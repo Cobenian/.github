@@ -1,6 +1,6 @@
 # Cobenian Engineering Standards — GitHub, CI & CD
 
-**Status:** Adopted · **Version:** 1.4 · **Last updated:** 2026-06-22
+**Status:** Adopted · **Version:** 1.5 · **Last updated:** 2026-06-22
 
 The single reference for how Cobenian repositories are structured, tested,
 deployed, and governed. The goal is **consistency by default**: every repo looks
@@ -407,7 +407,7 @@ Copy-pasted workflows drift. The durable fix is **one source of truth**:
    name: CI
    on:
      push: { branches: [main] }
-     pull_request: { branches: [main] }
+     pull_request:   # any base branch, so stacked PRs are CI-verified
    jobs:
      build-and-test:
        uses: Cobenian/.github/.github/workflows/elixir-ci.yml@v1
@@ -492,6 +492,10 @@ Legend: ✅ done · ⚠️ partial/drift · ☐ not started · n/a not applicabl
 
 ## Changelog
 
+- **1.5 (2026-06-22)** — Caller CI trigger drops the `pull_request: branches:
+  [main]` filter (now runs on PRs to any base) so **stacked PRs are CI-verified**.
+  `push` still deploys only from `main`. Updated `templates/ci.yml` and the §9
+  caller snippet.
 - **1.4 (2026-06-22)** — Fix §7: `required_pull_request_reviews` must be
   `{ required_approving_review_count: 0 }`, not `null`. `null` disables the
   "require a pull request before merging" rule (leaving direct pushes to `main`

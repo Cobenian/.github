@@ -5,8 +5,8 @@ name: CI
 on:
   push:
     branches: [main]
+  # Run on PRs to ANY base branch (not just main) so stacked PRs are CI-verified.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
