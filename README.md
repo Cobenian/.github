@@ -1,12 +1,7 @@
 # Cobenian/.github — shared CI/CD & community health
 
-This is the proposed content for the org-special **`Cobenian/.github`** repo. It is
-the single source of truth that all Cobenian repos inherit from, implementing
-[`STANDARDS.md`](../STANDARDS.md) §9.
-
-> Generated into `cobenian-cadence/org-github-repo/` for review/comparison. To
-> adopt: create the `Cobenian/.github` repo and move this directory's contents to
-> its root (drop the `org-github-repo/` wrapper).
+This is the org-special **`Cobenian/.github`** repo — the single source of truth
+that all Cobenian repos inherit from, implementing [`STANDARDS.md`](STANDARDS.md) §9.
 
 ## Layout
 
