@@ -88,6 +88,6 @@ The deploy trigger keys off the workflow **name** (`CI`), which is unaffected.
 |---|---|---|---|---|
 | cobenian-accounts | app | false | true | yes |
 | cobenian-cadence | app | false | true | yes |
-| cobenian-agents (Oversight) | app | false | true | yes (migrate to `workflow_run`) |
+| cobenian-agents (Oversight) | app | false | true | yes |
 | cobenian_companion_umbrella | app | true | true | yes |
 | cobenian-core-accounts | library | false | false | no |
