@@ -1,6 +1,6 @@
 # Cobenian Engineering Standards — GitHub, CI & CD
 
-**Status:** Adopted · **Version:** 1.5 · **Last updated:** 2026-06-22
+**Status:** Adopted · **Version:** 1.6 · **Last updated:** 2026-06-22
 
 The single reference for how Cobenian repositories are structured, tested,
 deployed, and governed. The goal is **consistency by default**: every repo looks
@@ -101,9 +101,9 @@ checkout
 > **Local convenience.** A `precommit` mix alias may mirror this gate but
 > **auto-fixes** (`format`, `deps.unlock --unused`) for developers. **CI must use
 > the check variants** (`--check-formatted`, `--check-unused`) so it *fails* rather
-> than silently fixing. (Repos that drive CI from a mutating `precommit` alias —
-> e.g. Oversight today — have a hole where unformatted code can merge; switch CI to
-> the explicit check steps below.)
+> than silently fixing. (A CI driven from a mutating `precommit` alias has a hole
+> where unformatted code can merge — use the explicit check steps below. All repos
+> now call the reusable workflow, which already uses the check variants.)
 
 **Reference `ci.yml` (application profile):**
 
@@ -228,10 +228,10 @@ the **CI** workflow completing successfully on `main`, and deploys the **exact S
 CI validated**. A failing build therefore stops the deploy itself.
 
 > **Why a separate `workflow_run` file, not an in-workflow `deploy` job?** An
-> in-workflow `deploy` job (`needs: test`, push-to-main) also works and is what
-> Oversight does today. We standardize on the separate `workflow_run` file because
-> it deploys the exact validated SHA, keeps deploy concerns out of the PR-time
-> workflow, and makes the gate explicit. Migrate in-workflow deploys to this.
+> in-workflow `deploy` job (`needs: test`, push-to-main) also works (Oversight used
+> to do this). We standardize on the separate `workflow_run` file because it deploys
+> the exact validated SHA, keeps deploy concerns out of the PR-time workflow, and
+> makes the gate explicit. All four apps now use this pattern.
 
 ```yaml
 name: Fly Deploy
@@ -443,22 +443,18 @@ Copy-pasted workflows drift. The durable fix is **one source of truth**:
 
 ## 10. Per-repo audit & safe rollout (the ratchet)
 
-Only the two **live** apps carry migration risk; the other three are greenfield and
-are born compliant when scaffolded. Adopt the standard on live apps by listing noisy
-new checks in the `nonblocking` input (or `continue-on-error` on the step), doing a
-cleanup pass, then promoting them to blocking — never breaking `main` in the process.
+**Rollout is complete** — all five repos call the reusable workflow (`@v1`) and
+every ratchet has been promoted to blocking. This table is kept as the historical
+record of what each repo started from and how it was brought clean; the `nonblocking`
+ratchet remains the playbook for any future live-app onboarding.
 
-| Repo | Profile | Risk | What surfaces / to do |
+| Repo | Profile | Start risk | Outcome |
 |---|---|---|---|
-| **cobenian-accounts** | app | 🟢 none | Greenfield — born compliant; reference implementation. |
-| **cobenian-core-accounts** | library | 🟢 none | Empty — apply library profile at scaffold (`profile: library`; no PG/sobelow/migrations/deploy). |
-| **cobenian-cadence** | app | 🟢 none | Spec-only today (no `mix.exs`). Apply at scaffold; add `.gitignore` for `erl_crash.dump`. |
-| **cobenian_companion_umbrella** (Companion) | app (umbrella) | 🟡 moderate | Has credo + dialyxir + Dependabot + `workflow_run` deploy. **Add** `sobelow` + `mix_audit` (never run); add `hex.audit`; add **gitleaks**; bump Postgres **16 → 17**; configure umbrella-aware sobelow/dialyzer (§3.3); add `docker` to Dependabot; add **linear history** to branch protection. Start `nonblocking: sobelow` (Dialyzer stays report-only via the default `dialyzer_blocking: false`). |
-| **cobenian-agents** (Oversight) | app | 🔴 high | Verified: 318 migrations; CI runs the mutating `mix precommit` alias (format hole); has `sobelow` + `mix_audit` (with accepted advisory ignore) but **no `credo`/`dialyxir`**; checkout `v6`; **already deploys** via an in-workflow `deploy` job (`needs: test`) — migrate it to the standard `fly-deploy.yml` (`workflow_run`). **Add** `credo` + `dialyxir` (credo never run on a large codebase; dialyzer unset — no PLT/ignore); add `hex.audit` + **gitleaks**; switch CI to explicit check steps (not `precommit`); bump checkout `v6 → v7`; add `docker` to Dependabot; add **linear history**. Keep the dup-timestamp check; keep `excellent_migrations` (if added) diff-scoped + non-blocking. Start `nonblocking: credo` (Dialyzer is already report-only via the default `dialyzer_blocking: false`; promote it later with `dialyzer_blocking: true`). |
-
-**Rollout order:** (1) Accounts at M0.5 — reference impl; (2) core-accounts at
-scaffold — validates the library profile; (3) Companion — moderate; (4) Oversight —
-phased cleanup behind `nonblocking`; (5) Cadence — when scaffolded.
+| **cobenian-accounts** | app | 🟢 none | Greenfield — born compliant; reference implementation. ✅ |
+| **cobenian-core-accounts** | library | 🟢 none | Library profile adopted at scaffold (`profile: library`; no PG/sobelow/migrations/deploy). ✅ |
+| **cobenian-cadence** | app | 🟢 none | App profile adopted at scaffold; `workflow_run` deploy + full gate from day one. ✅ |
+| **cobenian_companion_umbrella** (Companion) | app (umbrella) | 🟡 moderate | `sobelow` + `mix_audit` + `hex.audit` + gitleaks added; Postgres 17; umbrella-aware sobelow/dialyzer (§3.3); `docker` in Dependabot; linear history on. All gates blocking (`dialyzer_blocking: true`). ✅ |
+| **cobenian-agents** (Oversight) | app | 🔴 high | Migrated off the `precommit` CI alias and the in-workflow deploy → reusable `@v1` + `workflow_run`; `credo` + `dialyxir` added and ratcheted to blocking; sobelow findings skipped inline; cowlib CVE bumped; checkout `v7`; `docker` in Dependabot; linear history on. Ratchet **complete** (`nonblocking: ""`, `dialyzer_blocking: true`). ✅ |
 
 ---
 
@@ -478,13 +474,17 @@ phased cleanup behind `nonblocking`; (5) Cadence — when scaffolded.
 
 ### Current rollout status (2026-06-22)
 
+All repos are on the reusable workflow (`@v1`) with the standard branch protection
+(PR-required + 0 reviews + linear history + strict `Build and test`), Dependabot, and
+the full CI security layer. Adoption is complete.
+
 | Repo | Profile | ci.yml | fly-deploy | branch prot (this std) | dependabot | security layer (gitleaks/sobelow/audits) | risk |
 |---|---|---|---|---|---|---|---|
-| cobenian-accounts | app | ☐ | ☐ | ☐ | ☐ | ☐ | 🟢 |
-| cobenian-core-accounts | library | ☐ | n/a | ☐ | ☐ | ☐ | 🟢 |
-| cobenian-cadence | app | ☐ | ☐ | ☐ | ☐ | ☐ | 🟢 |
-| cobenian-agents | app | ⚠️ base only (precommit alias) | ⚠️ in-workflow `needs: test` (migrate to `workflow_run`) | ⚠️ no linear | ☐ | ⚠️ sobelow+mix_audit only | 🔴 |
-| cobenian_companion_umbrella | app | ⚠️ base only | ✅ | ⚠️ no linear | ✅ | ☐ | 🟡 |
+| cobenian-accounts | app | ✅ | ✅ | ✅ | ✅ | ✅ | 🟢 |
+| cobenian-core-accounts | library | ✅ | n/a | ✅ | ✅ | ✅ | 🟢 |
+| cobenian-cadence | app | ✅ | ✅ | ✅ | ✅ | ✅ | 🟢 |
+| cobenian-agents | app | ✅ | ✅ | ✅ | ✅ | ✅ | 🟢 |
+| cobenian_companion_umbrella | app | ✅ | ✅ | ✅ | ✅ | ✅ | 🟢 |
 
 Legend: ✅ done · ⚠️ partial/drift · ☐ not started · n/a not applicable.
 
@@ -492,6 +492,17 @@ Legend: ✅ done · ⚠️ partial/drift · ☐ not started · n/a not applicabl
 
 ## Changelog
 
+- **1.6 (2026-06-22)** — **Adoption complete.** Refreshed the §10/§11 status tables
+  to reflect reality: all five repos are on the reusable `@v1` workflow, every ratchet
+  is promoted to blocking, and Oversight has migrated off both its `precommit` CI alias
+  and its in-workflow deploy. Recorded the org-wide consistency sweep that closed the
+  remaining drift: **`required_pull_request_reviews: { count: 0 }` added to
+  core-accounts, cadence, agents, and companion** (they were missing the "require a PR
+  before merging" rule — only accounts had the v1.4 fix), the v1.5 bare-`pull_request:`
+  trigger propagated to the repos still filtering on `main`, `postgres 17.4` added to
+  `.tool-versions` where absent, and the per-repo governance files (`CONTRIBUTING.md`,
+  root `ARCHITECTURE.md`) filled in. Softened the now-historical §3 `precommit`-hole and
+  §4 in-workflow-deploy notes.
 - **1.5 (2026-06-22)** — Caller CI trigger drops the `pull_request: branches:
   [main]` filter (now runs on PRs to any base) so **stacked PRs are CI-verified**.
   `push` still deploys only from `main`. Updated `templates/ci.yml` and the §9
