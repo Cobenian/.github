@@ -1,6 +1,6 @@
 # Cobenian Engineering Standards — GitHub, CI & CD
 
-**Status:** Adopted · **Version:** 1.3 · **Last updated:** 2026-06-22
+**Status:** Adopted · **Version:** 1.4 · **Last updated:** 2026-06-22
 
 The single reference for how Cobenian repositories are structured, tested,
 deployed, and governed. The goal is **consistency by default**: every repo looks
@@ -353,7 +353,7 @@ gh api -X PUT "repos/$REPO/branches/main/protection" \
     "checks": [{ "context": "Build and test" }]
   },
   "enforce_admins": false,
-  "required_pull_request_reviews": null,
+  "required_pull_request_reviews": { "required_approving_review_count": 0 },
   "required_linear_history": true,
   "allow_force_pushes": false,
   "allow_deletions": false,
@@ -492,6 +492,11 @@ Legend: ✅ done · ⚠️ partial/drift · ☐ not started · n/a not applicabl
 
 ## Changelog
 
+- **1.4 (2026-06-22)** — Fix §7: `required_pull_request_reviews` must be
+  `{ required_approving_review_count: 0 }`, not `null`. `null` disables the
+  "require a pull request before merging" rule (leaving direct pushes to `main`
+  open); the 0-count object keeps PRs required with zero approvals (solo self-merge).
+  Verified against the live `cobenian-accounts` branch protection.
 - **1.3 (2026-06-22)** — Merged the reusable CI workflow with the cobenian-accounts
   session's version into one canonical `Cobenian/.github` set (in
   `org-github-repo/`). Adopted from Accounts: **`dialyzer_blocking`** input (Dialyzer
