@@ -1,0 +1,30 @@
+# Thin caller — copy to each repo as .github/workflows/ci.yml
+# Set the `with:` values per repo. See STANDARDS.md §3/§9.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    # Pin a tag and bump deliberately.
+    uses: Cobenian/.github/.github/workflows/elixir-ci.yml@v1
+    with:
+      profile: app             # app | library  (required)
+      umbrella: false          # true for Companion
+      postgres: true           # false for DB-less libraries
+      nonblocking: ""           # e.g. "credo,deps_audit" while ratcheting a live repo
+      dialyzer_blocking: false # report-only by default; flip to true once PLT + ignore file are stable
+      # sobelow_root: "apps/<web_app>"                       # umbrellas only
+      # migrations_path: "apps/<domain_app>/priv/repo/migrations"  # umbrellas only
+    secrets: inherit
+
+# NOTE: the required status-check context for branch protection becomes
+#   "build-and-test / Build and test"  (nested, because CI is a reusable workflow).
+# Update STANDARDS.md §7's `context` accordingly when you adopt this.

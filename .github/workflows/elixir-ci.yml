@@ -1,0 +1,166 @@
+# REUSABLE CI workflow — canonical for all Cobenian repos.
+#
+# DESTINATION: Cobenian/.github repo at .github/workflows/elixir-ci.yml
+# Consumed by each repo's thin .github/workflows/ci.yml via:
+#   uses: Cobenian/.github/.github/workflows/elixir-ci.yml@v1
+#
+# Staged here under org-github-repo/.github/workflows/ (mirrors the real path) for
+# review; it is NOT under THIS repo's .github/, so GitHub won't run it here.
+#
+# Merged from the cobenian-cadence and cobenian-accounts sessions. Implements
+# STANDARDS.md §3 (CI) with the §10 `nonblocking` ratchet.
+name: Elixir CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: "app | library (required — forces an explicit choice)"
+        type: string
+        required: true
+      umbrella:
+        description: "true for umbrella apps (e.g. Companion)"
+        type: boolean
+        default: false
+      postgres:
+        description: "start a Postgres service + run ecto setup"
+        type: boolean
+        default: true
+      nonblocking:
+        description: >-
+          Comma-separated checks to run report-only (continue-on-error) during a
+          repo's cleanup ramp. Recognized: credo, sobelow, hex_audit, deps_audit.
+          (Dialyzer is governed separately by `dialyzer_blocking`.)
+        type: string
+        default: ""
+      dialyzer_blocking:
+        description: "promote Dialyzer from report-only to blocking once PLTs are stable"
+        type: boolean
+        default: false
+      sobelow_root:
+        description: "Phoenix app root for Sobelow ('.' or 'apps/<web_app>' for umbrellas)"
+        type: string
+        default: "."
+      migrations_path:
+        description: "path to migrations for the duplicate-timestamp check"
+        type: string
+        default: "priv/repo/migrations"
+      elixir-version:
+        type: string
+        default: "1.20.0"
+      otp-version:
+        type: string
+        default: "29.0.1"
+      postgres_image:
+        type: string
+        default: "postgres:17"
+      gitleaks_version:
+        type: string
+        default: "8.21.2"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: test
+    services:
+      db:
+        image: ${{ inputs.postgres_image }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # Apps with hand-written migrations: fail fast on duplicate timestamps
+      # (two PRs merged the same day can collide; only breaks once both land on main).
+      - name: Check for duplicate migration versions
+        if: ${{ inputs.profile == 'app' }}
+        run: |
+          dir="${{ inputs.migrations_path }}"
+          [ -d "$dir" ] || { echo "No migrations dir ($dir) — skipping."; exit 0; }
+          dupes=$(ls "$dir" | grep -E '^[0-9]+_' | sed -E 's/_.*//' | sort | uniq -d)
+          if [ -n "$dupes" ]; then
+            echo "::error::Duplicate migration version(s): $dupes"; exit 1
+          fi
+          echo "No duplicate migration versions."
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ inputs.elixir-version }}
+          otp-version: ${{ inputs.otp-version }}
+
+      - name: Cache deps and _build
+        uses: actions/cache@v5
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-
+
+      - run: mix deps.get
+
+      # --- blocking hygiene + correctness (check variants — never auto-fix) ---
+      - name: deps.unlock --check-unused
+        run: mix deps.unlock --check-unused
+      - name: format --check-formatted
+        run: mix format --check-formatted
+      - name: compile --warnings-as-errors
+        run: mix compile --warnings-as-errors
+
+      # --- quality + security (ratchetable via `nonblocking`) ---
+      - name: credo --strict
+        run: mix credo --strict
+        continue-on-error: ${{ contains(inputs.nonblocking, 'credo') }}
+
+      - name: sobelow (apps only)
+        if: ${{ inputs.profile == 'app' }}
+        run: mix sobelow --exit --root ${{ inputs.sobelow_root }}
+        continue-on-error: ${{ contains(inputs.nonblocking, 'sobelow') }}
+
+      - name: hex.audit (retired packages)
+        run: mix hex.audit
+        continue-on-error: ${{ contains(inputs.nonblocking, 'hex_audit') }}
+
+      - name: deps.audit (Hex CVEs)
+        run: mix deps.audit
+        continue-on-error: ${{ contains(inputs.nonblocking, 'deps_audit') }}
+
+      # --- DB + tests ---
+      - name: Set up test database
+        if: ${{ inputs.postgres }}
+        run: mix ecto.create --quiet && mix ecto.migrate --quiet
+      - name: test
+        run: mix test
+
+      # --- Dialyzer (report-only until dialyzer_blocking: true) ---
+      - name: Cache Dialyzer PLTs
+        uses: actions/cache@v5
+        with:
+          path: priv/plts
+          key: ${{ runner.os }}-plt-v2-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-plt-v2-
+      - name: Dialyzer
+        run: mix dialyzer --format github
+        continue-on-error: ${{ !inputs.dialyzer_blocking }}
+
+      # --- secret scanning (replaces GHAS; runs on all repos) ---
+      # gitleaks CLI binary, NOT gitleaks-action@v2 — the action requires a paid
+      # license for organization accounts (Cobenian is an org); the binary is free.
+      # Pin the version and bump deliberately. See STANDARDS.md §5.
+      - name: gitleaks (secret scan)
+        run: |
+          v="${{ inputs.gitleaks_version }}"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${v}/gitleaks_${v}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks detect --source . --redact --no-banner --exit-code 1

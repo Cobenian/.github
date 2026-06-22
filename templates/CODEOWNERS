@@ -1,0 +1,4 @@
+# Copy to .github/CODEOWNERS in each repo. CODEOWNERS is NOT inheritable from
+# the org .github repo, so it must live per-repo. Auto-requests review; with
+# 0 required reviews (STANDARDS.md §2/§7) it is a courtesy, not a merge gate.
+* @brweber2

@@ -1,0 +1,28 @@
+# Copy to .github/dependabot.yml in an APPLICATION repo. See STANDARDS.md §5.
+# Note: dependabot.yml is NOT inheritable from the org .github repo — it must
+# live in each repo.
+version: 2
+updates:
+  - package-ecosystem: mix
+    directory: "/"
+    schedule: { interval: weekly }
+    groups:
+      mix-deps: { patterns: ["*"] }
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly }
+    groups:
+      actions: { patterns: ["*"] }
+
+  - package-ecosystem: docker        # only if the repo has a Dockerfile
+    directory: "/"
+    schedule: { interval: weekly }
+
+  # Add an `npm` block ONLY if the repo gains an assets/package.json.
+  # Phoenix 1.8 manages esbuild/tailwind via mix, so there is none by default.
+  # - package-ecosystem: npm
+  #   directory: "/assets"
+  #   schedule: { interval: weekly }
+  #   groups:
+  #     js-deps: { patterns: ["*"] }

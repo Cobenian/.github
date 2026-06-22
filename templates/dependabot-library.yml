@@ -1,0 +1,15 @@
+# Copy to .github/dependabot.yml in a LIBRARY repo (e.g. cobenian-core-accounts).
+# Libraries have no Dockerfile/assets — just Hex deps + actions.
+version: 2
+updates:
+  - package-ecosystem: mix
+    directory: "/"
+    schedule: { interval: weekly }
+    groups:
+      mix-deps: { patterns: ["*"] }
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly }
+    groups:
+      actions: { patterns: ["*"] }
