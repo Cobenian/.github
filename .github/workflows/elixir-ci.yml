@@ -108,6 +108,17 @@ jobs:
           key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: ${{ runner.os }}-mix-
 
+      # Authenticate to a private Cobenian Hex organization when a key is provided
+      # (repos with private Hex deps set the HEX_ORG_KEY secret; others no-op). Must
+      # run before deps.get so private packages resolve.
+      - name: Authenticate private Hex organization
+        env:
+          HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
+        run: |
+          if [ -n "$HEX_ORG_KEY" ]; then
+            mix hex.organization auth cobenian --key "$HEX_ORG_KEY"
+          fi
+
       - run: mix deps.get
 
       # --- blocking hygiene + correctness (check variants — never auto-fix) ---
