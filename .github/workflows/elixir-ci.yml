@@ -105,8 +105,8 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
-          restore-keys: ${{ runner.os }}-mix-
+          key: ${{ runner.os }}-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-mix-
 
       # Authenticate to a private Cobenian Hex organization when a key is provided
       # (repos with private Hex deps set the HEX_ORG_KEY secret; others no-op). Must
@@ -159,8 +159,8 @@ jobs:
         uses: actions/cache@v5
         with:
           path: priv/plts
-          key: ${{ runner.os }}-plt-v2-${{ hashFiles('**/mix.lock') }}
-          restore-keys: ${{ runner.os }}-plt-v2-
+          key: ${{ runner.os }}-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-plt-v2-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-plt-v2-
       - name: Dialyzer
         run: mix dialyzer --format github
         continue-on-error: ${{ !inputs.dialyzer_blocking }}
