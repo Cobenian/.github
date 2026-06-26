@@ -1,6 +1,8 @@
-# Per-repo (applications only) — copy to .github/workflows/fly-deploy.yml
-# Kept per-repo (not reusable) because the `workflow_run` trigger must live in
-# the repo's own workflow, and the app domain differs per repo. See STANDARDS.md §4.
+# Per-repo deploy (applications only) — copy to .github/workflows/fly-deploy.yml.
+# Thin caller of the REUSABLE deploy workflow in Cobenian/.github: the
+# `workflow_run` trigger + main gate must live here (a repo can't define another
+# repo's trigger), but the deploy steps live in the reusable workflow so
+# hardening is a one-edit change for every consumer. See STANDARDS.md §4.
 name: Fly Deploy
 
 on:
@@ -13,33 +15,14 @@ permissions:
 
 jobs:
   deploy:
-    name: Deploy app
-    runs-on: ubuntu-latest
     # Only a *successful* CI run on `main` deploys.
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main'
-    concurrency: deploy-group
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}   # deploy the exact validated SHA
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      # Retry once on a transient failure: the dominant flake is the Fly
-      # `release_command` machine failing/hanging on cold start (Postgres
-      # cold-connect or host scheduling), which a plain re-run clears. Safe
-      # because migrations are idempotent (already-applied versions skip).
-      # `--wait-timeout 15m` rides out a slow release-machine cold start
-      # instead of tripping flyctl's default 5m machine-state timeout.
-      - name: Deploy
-        run: |
-          flyctl deploy --remote-only --wait-timeout 15m || {
-            echo "::warning::First deploy attempt failed (transient Fly release-machine flake); retrying once."
-            flyctl deploy --remote-only --wait-timeout 15m
-          }
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      - name: Smoke test
-        run: |
-          sleep 15
-          curl -fsS "https://REPLACE_WITH_APP_DOMAIN/health" > /dev/null
+    uses: Cobenian/.github/.github/workflows/fly-deploy.yml@v1
+    with:
+      head_sha: ${{ github.event.workflow_run.head_sha }}
+      app_domain: REPLACE_WITH_APP_DOMAIN # e.g. accounts.cobenian.com
+      # ready_path: /readyz               # optional second smoke check (readiness)
+      # uses_hex_org_key: true            # set for repos that fetch private Hex deps
+    secrets: inherit

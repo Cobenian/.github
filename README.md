@@ -9,13 +9,14 @@ that all Cobenian repos inherit from, implementing [`STANDARDS.md`](STANDARDS.md
 .github/
   workflows/
     elixir-ci.yml          # REUSABLE CI (workflow_call) — the heavy lifting
+    fly-deploy.yml         # REUSABLE deploy (workflow_call) — retry + --wait-timeout + smoke
   PULL_REQUEST_TEMPLATE.md # org-default PR template (inherited)
   ISSUE_TEMPLATE/
     bug_report.md          # org-default (inherited)
     feature_request.md     # org-default (inherited)
 templates/                 # COPY these into each consumer repo (not inherited)
   ci.yml                   # thin caller of the reusable CI
-  fly-deploy.yml           # app deploy (per-repo: workflow_run trigger + app domain)
+  fly-deploy.yml           # thin caller of the reusable deploy (workflow_run trigger + app inputs)
   dependabot-app.yml       # → .github/dependabot.yml  (apps)
   dependabot-library.yml   # → .github/dependabot.yml  (libraries)
   CODEOWNERS               # → .github/CODEOWNERS       (not inheritable)
@@ -26,12 +27,13 @@ templates/                 # COPY these into each consumer repo (not inherited)
 define its own — no per-repo copy needed.
 
 ### Reusable, referenced by tag
-`elixir-ci.yml` is consumed via
-`uses: Cobenian/.github/.github/workflows/elixir-ci.yml@v1`. Tag releases (`v1`,
-`v1.1`, …) so consumers pin and bump deliberately.
+`elixir-ci.yml` (CI) and `fly-deploy.yml` (deploy) are consumed via
+`uses: Cobenian/.github/.github/workflows/<name>@v1`. Tag releases (`v1`, `v1.1`,
+…) so consumers pin and bump deliberately; `v1` is the moving major pointer.
+Deploy inputs are documented in [`STANDARDS.md`](STANDARDS.md) §4.
 
 ### Must be copied per repo (NOT inheritable)
-`ci.yml`, `fly-deploy.yml`, `dependabot.yml`, `CODEOWNERS`.
+`ci.yml`, `fly-deploy.yml` (both **thin callers** now), `dependabot.yml`, `CODEOWNERS`.
 
 ## Consuming the CI in a repo
 

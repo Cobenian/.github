@@ -1,0 +1,80 @@
+# REUSABLE Fly deploy (workflow_call). Consumers reference this by tag:
+#   uses: Cobenian/.github/.github/workflows/fly-deploy.yml@v1
+#
+# The triggering `workflow_run` event + main-branch gate stay in each repo's
+# thin caller (a repo can't define another repo's trigger); only the deploy
+# steps live here, so deploy hardening is a one-edit change for every consumer.
+# See STANDARDS.md §4.
+name: Fly Deploy (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      head_sha:
+        description: "Exact commit SHA that CI validated — the deploy checks this out."
+        required: true
+        type: string
+      app_domain:
+        description: "Host for the post-deploy smoke test, e.g. accounts.cobenian.com."
+        required: true
+        type: string
+      health_path:
+        description: "Liveness path to curl after deploy."
+        required: false
+        type: string
+        default: "/health"
+      ready_path:
+        description: "Optional readiness path to curl (e.g. /readyz); skipped when empty."
+        required: false
+        type: string
+        default: ""
+      uses_hex_org_key:
+        description: "Pass the private Cobenian Hex org key as a BuildKit build secret."
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      FLY_API_TOKEN:
+        required: true
+      HEX_ORG_KEY:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy app
+    runs-on: ubuntu-latest
+    concurrency: deploy-group
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.head_sha }} # deploy the exact validated SHA
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      # Retry once on a transient failure: the dominant flake is the Fly
+      # `release_command` machine failing/hanging on cold start (host scheduling
+      # or a Postgres cold-connect), which a plain re-run clears. Safe because
+      # the release command is idempotent (already-applied migrations skip).
+      # `--wait-timeout 15m` rides out a slow cold start instead of tripping
+      # flyctl's default 5m machine-state timeout.
+      - name: Deploy
+        run: |
+          args="--remote-only --wait-timeout 15m"
+          if [ "${{ inputs.uses_hex_org_key }}" = "true" ]; then
+            args="$args --build-secret hex_org_key=$HEX_ORG_KEY"
+          fi
+          flyctl deploy $args || {
+            echo "::warning::First deploy attempt failed (transient Fly release-machine flake); retrying once."
+            flyctl deploy $args
+          }
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
+      - name: Smoke test
+        run: |
+          sleep 15
+          curl -fsS "https://${{ inputs.app_domain }}${{ inputs.health_path }}" > /dev/null
+          if [ -n "${{ inputs.ready_path }}" ]; then
+            curl -fsS "https://${{ inputs.app_domain }}${{ inputs.ready_path }}" > /dev/null
+          fi
