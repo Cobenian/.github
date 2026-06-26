@@ -25,7 +25,18 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}   # deploy the exact validated SHA
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only
+      # Retry once on a transient failure: the dominant flake is the Fly
+      # `release_command` machine failing/hanging on cold start (Postgres
+      # cold-connect or host scheduling), which a plain re-run clears. Safe
+      # because migrations are idempotent (already-applied versions skip).
+      # `--wait-timeout 15m` rides out a slow release-machine cold start
+      # instead of tripping flyctl's default 5m machine-state timeout.
+      - name: Deploy
+        run: |
+          flyctl deploy --remote-only --wait-timeout 15m || {
+            echo "::warning::First deploy attempt failed (transient Fly release-machine flake); retrying once."
+            flyctl deploy --remote-only --wait-timeout 15m
+          }
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: Smoke test
