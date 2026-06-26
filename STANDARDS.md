@@ -253,7 +253,15 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only
+      # Retry once: the dominant CD flake is the Fly `release_command` machine
+      # failing/hanging on cold start, which a plain re-run clears (migrations
+      # are idempotent). `--wait-timeout 15m` rides out a slow cold start.
+      - name: Deploy
+        run: |
+          flyctl deploy --remote-only --wait-timeout 15m || {
+            echo "::warning::First deploy attempt failed (transient Fly release-machine flake); retrying once."
+            flyctl deploy --remote-only --wait-timeout 15m
+          }
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: Smoke test
@@ -265,6 +273,17 @@ jobs:
 **Migrations on deploy:** run via the Fly **release command** (`mix ecto.migrate`
 in the release), configured in `fly.toml` / the release module — not in the
 workflow.
+
+**Transient release-machine flakes:** the `release_command` machine occasionally
+fails or hangs on cold start (Fly host scheduling, or a Postgres cold-connect),
+aborting an otherwise-good deploy with errors like `internal: process not found`,
+`machine failed to start`, or `deadline_exceeded: machine still starting`. The
+deploy step therefore **retries once** and passes `--wait-timeout 15m` to ride out
+a slow cold start; this is safe because the release command is idempotent
+(already-applied migrations skip). A genuinely broken migration still fails after
+the second attempt. For a persistent platform blip, the fallback is a manual rerun
+of the Fly Deploy workflow (`gh run rerun <id> --failed`), spacing reruns a few
+minutes apart so Fly's host pool can recover.
 
 **Deploy bootstrap (one-time, manual — see §6):** the first deploy is done locally
 by a human (`fly launch` is interactive and creates the app). The workflow handles
