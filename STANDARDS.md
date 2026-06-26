@@ -231,7 +231,13 @@ CI validated**. A failing build therefore stops the deploy itself.
 > in-workflow `deploy` job (`needs: test`, push-to-main) also works (Oversight used
 > to do this). We standardize on the separate `workflow_run` file because it deploys
 > the exact validated SHA, keeps deploy concerns out of the PR-time workflow, and
-> makes the gate explicit. All four apps now use this pattern.
+> makes the gate explicit. Every app uses this pattern via the thin caller below.
+
+The deploy **steps live in a reusable workflow** in `Cobenian/.github`
+(`.github/workflows/fly-deploy.yml`, `workflow_call`), so deploy hardening is a
+one-edit change for every app. Each app keeps a **thin caller** that owns only what
+must be local — the `workflow_run` trigger and the main-branch gate — and passes
+per-app inputs (mirrors how CI is split: thin `ci.yml` → `elixir-ci.yml@v1`):
 
 ```yaml
 name: Fly Deploy
@@ -239,36 +245,37 @@ on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
+permissions:
+  contents: read
 
 jobs:
   deploy:
-    name: Deploy app
-    runs-on: ubuntu-latest
+    # Only a *successful* CI run on `main` deploys.
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main'
-    concurrency: deploy-group
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      # Retry once: the dominant CD flake is the Fly `release_command` machine
-      # failing/hanging on cold start, which a plain re-run clears (migrations
-      # are idempotent). `--wait-timeout 15m` rides out a slow cold start.
-      - name: Deploy
-        run: |
-          flyctl deploy --remote-only --wait-timeout 15m || {
-            echo "::warning::First deploy attempt failed (transient Fly release-machine flake); retrying once."
-            flyctl deploy --remote-only --wait-timeout 15m
-          }
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      - name: Smoke test
-        run: |
-          sleep 15
-          curl -fsS "https://<app-domain>/health" > /dev/null
+    uses: Cobenian/.github/.github/workflows/fly-deploy.yml@v1
+    with:
+      head_sha: ${{ github.event.workflow_run.head_sha }}
+      app_domain: <app-domain>   # e.g. accounts.cobenian.com
+      # ready_path: /readyz      # optional readiness smoke check
+      # uses_hex_org_key: true   # repos that fetch private Hex deps
+    secrets: inherit
 ```
+
+### Reusable deploy inputs
+
+| Input | Default | Notes |
+|---|---|---|
+| `head_sha` | — (required) | exact SHA CI validated; the deploy checks this out |
+| `app_domain` | — (required) | host for the post-deploy smoke test |
+| `health_path` | `/health` | liveness path curled after deploy |
+| `ready_path` | `""` | optional readiness path (e.g. `/readyz`); skipped when empty |
+| `uses_hex_org_key` | `false` | pass the private Cobenian Hex org key as a BuildKit build secret |
+
+Secrets `FLY_API_TOKEN` (required) and `HEX_ORG_KEY` (optional) flow through
+`secrets: inherit`. Like the reusable CI, the deploy workflow is pinned by tag
+(`@v1`); bump deliberately.
 
 **Migrations on deploy:** run via the Fly **release command** (`mix ecto.migrate`
 in the release), configured in `fly.toml` / the release module — not in the
@@ -278,8 +285,8 @@ workflow.
 fails or hangs on cold start (Fly host scheduling, or a Postgres cold-connect),
 aborting an otherwise-good deploy with errors like `internal: process not found`,
 `machine failed to start`, or `deadline_exceeded: machine still starting`. The
-deploy step therefore **retries once** and passes `--wait-timeout 15m` to ride out
-a slow cold start; this is safe because the release command is idempotent
+reusable deploy step therefore **retries once** and passes `--wait-timeout 15m` to
+ride out a slow cold start; this is safe because the release command is idempotent
 (already-applied migrations skip). A genuinely broken migration still fails after
 the second attempt. For a persistent platform blip, the fallback is a manual rerun
 of the Fly Deploy workflow (`gh run rerun <id> --failed`), spacing reruns a few
