@@ -1,6 +1,6 @@
 # Cobenian Platform Adoption Standard — Foundry & Data APIs
 
-**Status:** Draft · **Version:** 0.1 · **Last updated:** 2026-07-03
+**Status:** Draft · **Version:** 0.2 · **Last updated:** 2026-07-04
 
 How a Cobenian product consumes the platform layers — **Accounts** (identity),
 **Foundry** (capabilities), and **Data APIs** (canonical business records). The
@@ -77,9 +77,11 @@ the triple. Monolithic single-module facades and per-context ad-hoc clients are
 
 ### C3 — One reference shape and shared normalizers MUST be used
 
-Wire JSON is string-keyed and shape-variant. Products **MUST** normalize at the
-facade boundary using the shared helpers, and **MUST NOT** hand-roll per-product
-or per-context normalizers.
+Wire JSON is string-keyed and shape-variant. For the cross-product concepts a
+product actually handles (contacts, companies, invoices, …), it **MUST** normalize
+at the facade boundary using the shared helpers, and **MUST NOT** hand-roll
+per-product or per-context normalizers. A product that owns its own data plane and
+doesn't project these shared shapes simply has nothing to normalize here.
 
 - A cross-layer reference is the canonical struct
   `%Cobenian.CorePlatform.Ref{api: ..., type: ..., id: ...}`.
@@ -89,22 +91,30 @@ or per-context normalizers.
 - The same concept **MUST** use the same key name across every product. A contact
   ref is `:ref` everywhere; an invoice id is `:id` everywhere.
 
-### C4 — Error mapping MUST be honest and uniform
+### C4 — Error mapping MUST be honest and go through the shared mapper
 
-Facade functions **MUST** map SDK errors through the shared mapper:
+Facade functions **MUST** map SDK errors through `Cobenian.CorePlatform.Errors`
+rather than hand-rolling per-seam logic, and **MUST NOT** fabricate a result on
+failure (no invented metrics, drafts, or IDs) — an honest error beats a plausible
+lie.
 
-- `:budget_exceeded` and `:blocked` **MUST** be surfaced to the caller verbatim
-  (they are user-actionable).
-- Every other failure **MUST** collapse to a single `:unavailable`.
-- On any error a product **MUST NOT** fabricate a result (no invented metrics,
-  drafts, or IDs). "Honest unavailable" beats a plausible lie.
+- `:budget_exceeded` and `:blocked` **MUST** be surfaced to the caller (they are
+  user-actionable).
+- By default every other failure collapses to a single `:unavailable`.
+- A product that *acts on* a more granular reason — e.g. Cadence resolving a ref
+  treats `:not_found` differently from a transport error, or a Comms seam
+  distinguishes `:invalid_request` (a suppressed recipient) — **MAY** surface the
+  reasons it needs via `Errors.flatten(result, surface: [...])`. The rule is
+  *honest, shared mapping*, not mandatory collapse.
 
 ### C5 — Inference tiers MUST use the shared vocabulary
 
+For a product that routes LLM calls through **Foundry Inference**:
+
 - The only tier names are `"fast"`, `"balanced"`, `"smart"`.
 - Tier **MUST** be chosen by *purpose* through named constants
-  (e.g. `@tier_extract "fast"`, `@tier_judge "smart"`), not scattered string
-  literals at call sites.
+  (e.g. `@tier_extract Tier.fast()`, `@tier_judge Tier.smart()`), not scattered
+  string literals at call sites.
 
 ### C6 — Config and test seams MUST be uniform
 
@@ -158,9 +168,14 @@ waves (tracked separately in the rollout plan):
 
 - **Wave A — standardize the seam.** Publish `cobenian_core_platform`; refactor
   each facade to the triple + shared helpers. Behaviour-preserving; this closes
-  the known drift bugs as a side effect.
+  the known drift bugs as a side effect. A product only takes a Wave-A change
+  where the kit applies *without changing behaviour* — a product that deliberately
+  surfaces granular reasons (C4) or doesn't yet route through Foundry Inference
+  (C5) or Directory/Data (C3) adopts the kit in the wave that introduces that
+  surface, not before.
 - **Wave B — close wired-but-dormant gaps.** Adopt the surfaces each product has
-  scaffolded but not activated (see rollout plan).
+  scaffolded but not activated (see rollout plan) — which is also where those
+  products pick up the kit's tiers and normalizers.
 - **Wave C — compose across products via Events.** A shared Events catalog so
   products react to each other instead of re-integrating.
 
@@ -172,5 +187,11 @@ behaviour`) keeps it from regressing, mirroring the CI ratchet in
 
 ## Changelog
 
+- **0.2 (2026-07-04)** — Refined from first implementations (Glean, Orbit). C4 no
+  longer mandates collapse-to-`:unavailable`: products that *act on* a granular
+  reason (Cadence ref resolution, Comms suppression) surface it via
+  `Errors.flatten(surface: …)`. C3/C5 scoped to the concepts/surfaces a product
+  actually uses. Rollout notes that granular-reason and not-yet-on-Inference
+  products adopt the kit in the wave that introduces the surface.
 - **0.1 (2026-07-03)** — Initial draft. Six conventions, layer boundaries,
   conformance checklist, three-wave rollout.
