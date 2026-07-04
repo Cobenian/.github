@@ -17,6 +17,11 @@ and behaves the same, so anyone can move between them without surprises.
 > on private repos. We use CI-based equivalents instead (§5) — chiefly **gitleaks**.
 > CodeQL also does not support Elixir, so we would not use it regardless.
 
+> **Companion standard.** This file governs how repos are *built and shipped*.
+> How product code *talks to the platform* (Accounts, Foundry, Data APIs) lives in
+> [`PLATFORM-ADOPTION.md`](./PLATFORM-ADOPTION.md) — the six client-adoption
+> conventions every consuming product follows.
+
 ---
 
 ## 1. Repository profiles
