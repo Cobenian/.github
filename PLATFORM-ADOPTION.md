@@ -176,8 +176,9 @@ waves (tracked separately in the rollout plan):
 - **Wave B — close wired-but-dormant gaps.** Adopt the surfaces each product has
   scaffolded but not activated (see rollout plan) — which is also where those
   products pick up the kit's tiers and normalizers.
-- **Wave C — compose across products via Events.** A shared Events catalog so
-  products react to each other instead of re-integrating.
+- **Wave C — compose across products via Events.** Products emit domain events and
+  react to each other's, instead of re-integrating. The contract — names, payloads,
+  and the producer/consumer matrix — is [`EVENTS-CATALOG.md`](./EVENTS-CATALOG.md).
 
 Once a product is conforming, a lightweight test (`assert Facade uses the shared
 behaviour`) keeps it from regressing, mirroring the CI ratchet in
