@@ -1,6 +1,6 @@
 # Cobenian Cross-Product Events Catalog
 
-**Status:** Draft · **Version:** 0.1 · **Last updated:** 2026-07-04
+**Status:** Draft · **Version:** 0.2 · **Last updated:** 2026-07-05
 
 The contract for how Cobenian products **react to each other** — the Wave C of
 [`PLATFORM-ADOPTION.md`](./PLATFORM-ADOPTION.md). Products emit domain events onto
@@ -53,32 +53,51 @@ Cobenian.CoreFoundry.Events.emit(
 
 ## 3. Catalog
 
-| Event | Producer | `subject` | `data` (minimal) | Consumers |
-|-------|----------|-----------|------------------|-----------|
-| `glean.response.captured` | Glean | `Ref(glean, response, id)` | `questionnaire_id`, `contact_ref?` | Orbit |
-| `glean.questionnaire.completed` | Glean | `Ref(glean, questionnaire, id)` | `response_count`, `subject_ref?` | Orbit, Cadence |
-| `orbit.relationship.changed` | Orbit | `Ref(directory, contact, id)` | `from_temp`, `to_temp`, `reason` | Cadence |
-| `orbit.campaign.sent` | Orbit | `Ref(marketing, campaign, id)` | `recipient_count` | Cadence, Foresight |
-| `cadence.decision.needs_you` | Cadence | `Ref(cadence, decision, id)` | `playbook`, `urgency` | (Accounts notify — existing) |
-| `cadence.playbook.completed` | Cadence | `Ref(cadence, run, id)` | `playbook`, `outcome` | Orbit |
-| `foresight.alert.raised` | Foresight | `Ref(foresight, entity, id)` | `severity`, `signal` | Cadence |
+Events name **actions** — a thing a product *did* that another product can't learn
+by reading canonical data. They are **not** for state another product can already
+*derive* from the shared planes (see the boundary below).
+
+| Event | Producer | `subject` | `data` (minimal) | Consumers | Status |
+|-------|----------|-----------|------------------|-----------|--------|
+| `glean.response.captured` | Glean | `Ref(glean, response, id)` | `questionnaire_id` | Cadence | **live** |
+| `glean.questionnaire.completed` | Glean | `Ref(glean, questionnaire, id)` | `response_count` | Cadence | planned |
+| `orbit.campaign.sent` | Orbit | `Ref(marketing, campaign, id)` | `recipient_count` | Cadence, Foresight | planned |
+| `cadence.decision.needs_you` | Cadence | `Ref(cadence, decision, id)` | `playbook`, `urgency` | (Accounts notify) | live |
+| `cadence.playbook.completed` | Cadence | `Ref(cadence, run, id)` | `playbook`, `outcome` | Orbit | planned |
+| `foresight.alert.raised` | Foresight | `Ref(foresight, entity, id)` | `severity`, `signal` | Cadence | live |
 
 Rows are additive: a producer may emit an event with **no** consumer yet (the
 half of a future choreography), and a consumer subscribes when it has a reason to
 act. An unconsumed event is not dead code — it's the seam.
 
+> **Not everything is an event — the derived-state boundary.** If a consumer can
+> compute the fact by reading a canonical plane, it **MUST** read, not subscribe.
+> Example: Orbit's relationship *temperature* is a pure function of a contact's
+> `last_interaction_at` in **Directory**, recomputed on read. When Glean finishes a
+> response it writes that contact through the Directory port, and Orbit's
+> temperature simply recomputes next read — so there is **no** `orbit.relationship.changed`
+> event; that hop composes through shared data (reference-don't-copy), not the spine.
+> Reserve events for actions with no data footprint a consumer could poll.
+
 ## 4. Reference choreography (Wave C proof)
 
-The first end-to-end chain, each hop over Foundry Events:
+The first end-to-end chain — every hop a real action, no derived state faked as an
+event:
 
-1. A respondent finishes a questionnaire → **Glean** emits
-   `glean.questionnaire.completed`.
-2. **Orbit** consumes it, updates the contact's relationship temperature, and emits
-   `orbit.relationship.changed`.
-3. **Cadence** consumes that and, if a playbook watches the signal, opens a decision
-   (`cadence.decision.needs_you`) for a human.
+1. A respondent finishes a response → **Glean** emits `glean.response.captured`
+   (**live** — flag-gated in prod).
+2. **Cadence** consumes it: if a playbook watches new responses for the workspace,
+   it opens a decision (`cadence.decision.needs_you`) for a human.
 
-No product imported another. Each reacted to a named fact on the spine.
+The relationship side-effect (the contact warming up) needs **no** event: Glean's
+finalize writes the contact through Directory, and Orbit's temperature recomputes on
+its next read. Events carry the *action* (a response arrived); shared data carries
+the *state* (who's warm now). No product imported another.
+
+To make step 2 live, Cadence must register as a Foundry **peer** (its own
+`FOUNDRY_PEER_SECRET` + an events-ingress endpoint) and add a trigger for
+`glean.response.captured` — the consumer-side provisioning that mirrors what
+Foresight already has.
 
 ## 5. Adding to the catalog
 
@@ -91,5 +110,11 @@ No product imported another. Each reacted to a named fact on the spine.
 
 ## Changelog
 
+- **0.2 (2026-07-05)** — Reconciled with implementation. Dropped
+  `orbit.relationship.changed`: Orbit derives temperature from Directory on read, so
+  that hop composes through shared data, not an event. Added the derived-state
+  boundary rule ("events name actions, not pollable state"), a Status column
+  (`glean.response.captured` is live), and a real 2-hop reference chain
+  (Glean response → Cadence decision) with the consumer-side peer provisioning noted.
 - **0.1 (2026-07-04)** — Initial catalog: Glean/Orbit/Cadence/Foresight domain
   events + the Glean→Orbit→Cadence reference choreography.
