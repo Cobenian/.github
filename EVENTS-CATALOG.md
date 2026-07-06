@@ -1,6 +1,6 @@
 # Cobenian Cross-Product Events Catalog
 
-**Status:** Draft · **Version:** 0.2 · **Last updated:** 2026-07-05
+**Status:** Draft · **Version:** 0.3 · **Last updated:** 2026-07-05
 
 The contract for how Cobenian products **react to each other** — the Wave C of
 [`PLATFORM-ADOPTION.md`](./PLATFORM-ADOPTION.md). Products emit domain events onto
@@ -61,7 +61,7 @@ by reading canonical data. They are **not** for state another product can alread
 |-------|----------|-----------|------------------|-----------|--------|
 | `glean.response.captured` | Glean | `Ref(glean, response, id)` | `questionnaire_id` | Cadence | **live** |
 | `glean.questionnaire.completed` | Glean | `Ref(glean, questionnaire, id)` | `response_count` | Cadence | planned |
-| `orbit.campaign.sent` | Orbit | `Ref(marketing, campaign, id)` | `recipient_count` | Cadence, Foresight | planned |
+| `orbit.campaign.sent` | Orbit | `Ref(marketing, campaign, id)` | `target_ref` | Cadence, Foresight | **live** |
 | `cadence.decision.needs_you` | Cadence | `Ref(cadence, decision, id)` | `playbook`, `urgency` | (Accounts notify) | live |
 | `cadence.playbook.completed` | Cadence | `Ref(cadence, run, id)` | `playbook`, `outcome` | Orbit | planned |
 | `foresight.alert.raised` | Foresight | `Ref(foresight, entity, id)` | `severity`, `signal` | Cadence | live |
@@ -110,6 +110,9 @@ Foresight already has.
 
 ## Changelog
 
+- **0.3 (2026-07-05)** — `orbit.campaign.sent` is now live. Orbit is approve-each, so
+  it fires **per confirmed send** (one target), not per batch: `data` carries the
+  target's Directory ref (`target_ref`), not a `recipient_count`.
 - **0.2 (2026-07-05)** — Reconciled with implementation. Dropped
   `orbit.relationship.changed`: Orbit derives temperature from Directory on read, so
   that hop composes through shared data, not an event. Added the derived-state
