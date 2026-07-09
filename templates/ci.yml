@@ -23,11 +23,7 @@ jobs:
       dialyzer_blocking: false # report-only by default; flip to true once PLT + ignore file are stable
       # sobelow_root: "apps/<web_app>"                       # umbrellas only
       # migrations_path: "apps/<domain_app>/priv/repo/migrations"  # umbrellas only
-      # foundry_events_url: "https://console.cobenian.com/api/events"  # override only for staging
     secrets: inherit
-    # OPTIONAL: to publish CI security posture to Foundry / Panel (PANEL-SEC-042), set a
-    # repo secret FOUNDRY_INGEST_TOKEN (workspace-scoped Foundry bearer). It rides
-    # `secrets: inherit`. Absent → the emit step is a no-op; nothing else changes.
 
 # NOTE: the required status-check context for branch protection becomes
 #   "build-and-test / Build and test"  (nested, because CI is a reusable workflow).
