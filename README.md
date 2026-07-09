@@ -84,6 +84,42 @@ gh api repos/Cobenian/<repo>/commits/<sha>/check-runs --jq '.check_runs[].name'
 
 The deploy trigger keys off the workflow **name** (`CI`), which is unaffected.
 
+## CI security-posture artifact → Foundry / Panel
+
+After the build, the reusable CI re-runs the Elixir scanners in machine-readable mode,
+folds their results into **one JSON file**, and uploads it as the workflow-run artifact
+**`cobenian-scan-posture`**. Foundry's GitHub connector reads that artifact off the
+completed run and emits `connectors.scan_result.received` so **Cobenian Panel's app &
+security monitor** can fold CI-computed posture per repo + commit (issue
+[#106](https://github.com/Cobenian/cobenian-foundry/issues/106) **Option A**;
+cobenian-foundry SPEC-CON-003 §14).
+
+- **No configuration, no secret, no endpoint.** The connector pulls the artifact via the
+  GitHub App install it already has — CI needs no `FOUNDRY_INGEST_TOKEN` and makes no
+  network call to Foundry. (This replaces the reverted POST-with-bearer emitter,
+  PR #11 → reverted by #12; only the *transport* changed.)
+- **Always-on & never a gate.** The build/upload steps are `continue-on-error: true` +
+  `if: always()` and internally guarded, so they can **never** fail a caller's build and
+  still run when an earlier blocking scanner failed. The existing blocking scanner steps
+  are unchanged and still own pass/fail.
+- **Artifact contract** — the single JSON file's body:
+
+  ```jsonc
+  { "source": "github",                        // links to the repo/workflow_run events
+    "repo": "<owner>/<repo>", "head_sha": "…", "run_url": "…",
+    "workflow_run_id": "…", "scanned_at": "<ISO8601>",
+    "sobelow":      { "findings": N, "by_confidence": { "high": N, "medium": N, "low": N } },
+    "mix_audit":    [ { "package": "…", "id": "CVE/GHSA", "severity": "…", "title": "…" } ],
+    "hex_audit":    [ { "package": "…", "version": "…", "reason": "…" } ],
+    "gitleaks":     { "secrets_found": N },     // COUNT ONLY — never a value or location
+    "hex_outdated": [ { "package": "…", "current": "…", "latest": "…" } ] }
+  ```
+
+  A scanner that did not run or failed is **omitted** — never fabricated as clean. Per
+  cobenian-foundry **CON-GH-015**, no secret values, secret locations, or source snippets
+  are ever emitted (gitleaks/Sobelow contribute counts only); the raw scanner reports stay
+  on the runner and are never uploaded.
+
 ## Per-repo profile cheat-sheet
 
 | Repo | profile | umbrella | postgres | deploy |

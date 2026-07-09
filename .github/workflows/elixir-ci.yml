@@ -175,3 +175,174 @@ jobs:
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${v}/gitleaks_${v}_linux_x64.tar.gz" \
             | tar -xz gitleaks
           ./gitleaks detect --source . --redact --no-banner --exit-code 1
+
+      # --- CI-computed security/freshness posture → workflow-run artifact (issue #106 Option A) ---
+      # Re-runs the scanners in machine-readable mode, folds their results into ONE JSON
+      # file, and uploads it as the `cobenian-scan-posture` artifact. Foundry's GitHub
+      # connector (cobenian-foundry SPEC-CON-003 §14, CON-GH-028…034) reads this artifact
+      # off the completed workflow run and emits `connectors.scan_result.received` for
+      # Cobenian Panel's app & security monitor — with NO CI credential and NO Foundry
+      # endpoint. This is issue #106 Option A: it replaces the reverted POST-with-bearer
+      # emitter (PR #11, reverted by #12). Only the *transport* changed — artifact upload
+      # instead of an authenticated POST to /api/events. There is deliberately no
+      # FOUNDRY_INGEST_TOKEN and no network call to Foundry here.
+      #
+      # NON-BLOCKING & always-on: `continue-on-error: true` + `if: always()` + internal
+      # `|| true` guards — this step can NEVER fail a caller's build, and it still runs
+      # when an earlier blocking scanner failed the job (posture is most useful on a
+      # failing build). The existing blocking scanner steps above are unchanged and still
+      # own pass/fail.
+      #
+      # CONTRACT (cobenian-foundry SPEC-CON-003 §14): the file body IS the flat scan-result
+      # payload — source / repo / head_sha / run_url / workflow_run_id / scanned_at plus one
+      # section per scanner. A scanner that did not run or failed is OMITTED — never
+      # fabricated as clean. The connector validates source/repo/head_sha and passes the
+      # scanner sub-objects through verbatim (counts-only for sobelow/gitleaks).
+      #
+      # SECRETS DISCIPLINE (cobenian-foundry CON-GH-015): gitleaks contributes a COUNT
+      # only — never a secret value or its file/line location. Sobelow contributes COUNTS
+      # only — no source snippets. The raw scanner report files stay in .scan/ on the
+      # runner and are NEVER uploaded; only the folded scan-posture.json (counts + advisory
+      # metadata) becomes the artifact.
+      - name: Build scan posture (issue #106 Option A)
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          PROFILE: ${{ inputs.profile }}
+          SOBELOW_ROOT: ${{ inputs.sobelow_root }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GITLEAKS_VERSION: ${{ inputs.gitleaks_version }}
+        run: |
+          # NOTE: no `set -e` / no `set -x`. We must never fail the build.
+          set -uo pipefail
+          mkdir -p .scan
+
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          SCANNED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # Base payload — always present, the minimal identity the connector validates
+          # and Panel folds on. run_url/workflow_run_id/head_sha are included for
+          # completeness even though the connector overrides them from the actual run.
+          BASE="$(jq -n \
+            --arg source "github" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg sha "$HEAD_SHA" \
+            --arg run_url "$RUN_URL" \
+            --arg wf_id "$GITHUB_RUN_ID" \
+            --arg scanned_at "$SCANNED_AT" \
+            '{source:$source, repo:$repo, head_sha:$sha, run_url:$run_url,
+              workflow_run_id:$wf_id, scanned_at:$scanned_at}')"
+
+          # Each section defaults to `null` (= did not run / unparseable → OMITTED). A
+          # scanner that ran and legitimately found nothing yields 0 / [] (honest empty).
+
+          # --- Sobelow (apps only): counts + by_confidence, NO snippets ---
+          SOBELOW='null'
+          if [ "$PROFILE" = "app" ]; then
+            mix sobelow --format json --root "$SOBELOW_ROOT" > .scan/sobelow.json 2>/dev/null || true
+            if jq -e . .scan/sobelow.json >/dev/null 2>&1; then
+              SOBELOW="$(jq '
+                (.findings.high_confidence // [] | length) as $h
+                | (.findings.medium_confidence // [] | length) as $m
+                | (.findings.low_confidence // [] | length) as $l
+                | {findings: ($h+$m+$l),
+                   by_confidence: {high:$h, medium:$m, low:$l}}' \
+                .scan/sobelow.json 2>/dev/null || echo null)"
+            fi
+          fi
+
+          # --- mix_audit (Hex CVEs): list of {package,id,severity,title} ---
+          MIX_AUDIT='null'
+          mix deps.audit --format json > .scan/mixaudit.json 2>/dev/null || true
+          if jq -e . .scan/mixaudit.json >/dev/null 2>&1; then
+            MIX_AUDIT="$(jq '[.vulnerabilities[]? | {
+              package: (.advisory.package // .dependency.package // null),
+              id: (.advisory.cve // .advisory.id // null),
+              severity: (.advisory.severity // null),
+              title: (.advisory.title // null)
+            }]' .scan/mixaudit.json 2>/dev/null || echo null)"
+          fi
+
+          # --- hex.audit (retired packages): list of {package,version,reason} ---
+          # Text output only (no JSON format). exit 0 = none retired (honest []);
+          # exit 1 = retired found → best-effort parse; anything else → null (omit).
+          HEX_AUDIT='null'
+          if mix hex.audit > .scan/hexaudit.txt 2>/dev/null; then
+            HEX_AUDIT='[]'
+          elif [ $? -eq 1 ]; then
+            HEX_AUDIT="$(awk '
+              /^[[:space:]]*\*?[[:space:]]*[A-Za-z0-9_]+[[:space:]]+[0-9]/ {
+                pkg=$1; if (pkg=="*") pkg=$2;
+                ver=""; for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]/) {ver=$i; break}
+                reason=$0; sub(/^[^:]*:[[:space:]]*/, "", reason);
+                gsub(/"/, "\\\"", reason);
+                printf "{\"package\":\"%s\",\"version\":\"%s\",\"reason\":\"%s\"}\n", pkg, ver, reason
+              }' .scan/hexaudit.txt | jq -sc . 2>/dev/null || echo null)"
+          fi
+
+          # --- gitleaks (secret scan): COUNT ONLY — never value or location ---
+          GITLEAKS='null'
+          if [ ! -x ./gitleaks ]; then
+            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+              | tar -xz gitleaks 2>/dev/null || true
+          fi
+          if [ -x ./gitleaks ]; then
+            ./gitleaks detect --source . --redact --no-banner \
+              --report-format json --report-path .scan/gitleaks.json --exit-code 0 \
+              >/dev/null 2>&1 || true
+            if jq -e . .scan/gitleaks.json >/dev/null 2>&1; then
+              N="$(jq 'length' .scan/gitleaks.json 2>/dev/null)"
+              case "$N" in
+                ''|*[!0-9]*) : ;;
+                *) GITLEAKS="$(jq -n --argjson n "$N" '{secrets_found:$n}')" ;;
+              esac
+            fi
+          fi
+
+          # --- hex.outdated: list of {package,current,latest} ---
+          # Text/table output only. exit 0 = all current (honest []); exit 1 = some
+          # outdated → best-effort table parse; else null (omit).
+          HEX_OUTDATED='null'
+          if mix hex.outdated > .scan/outdated.txt 2>/dev/null; then
+            HEX_OUTDATED='[]'
+          elif [ $? -eq 1 ]; then
+            HEX_OUTDATED="$(awk '
+              NR>1 && $1 ~ /^[A-Za-z0-9_]+$/ && $2 ~ /^[0-9]+\.[0-9]/ && $3 ~ /^[0-9]+\.[0-9]/ && $2 != $3 {
+                printf "{\"package\":\"%s\",\"current\":\"%s\",\"latest\":\"%s\"}\n", $1, $2, $3
+              }' .scan/outdated.txt | jq -sc . 2>/dev/null || echo null)"
+          fi
+
+          # Fold present sections into the payload; omit any that stayed null.
+          PAYLOAD="$(echo "$BASE" | jq \
+            --argjson sobelow "$SOBELOW" \
+            --argjson mix_audit "$MIX_AUDIT" \
+            --argjson hex_audit "$HEX_AUDIT" \
+            --argjson gitleaks "$GITLEAKS" \
+            --argjson hex_outdated "$HEX_OUTDATED" '
+            . + (if $sobelow      == null then {} else {sobelow:      $sobelow}      end)
+              + (if $mix_audit    == null then {} else {mix_audit:    $mix_audit}    end)
+              + (if $hex_audit    == null then {} else {hex_audit:    $hex_audit}    end)
+              + (if $gitleaks     == null then {} else {gitleaks:     $gitleaks}     end)
+              + (if $hex_outdated == null then {} else {hex_outdated: $hex_outdated} end)')"
+
+          # Write the ONE JSON file that becomes the artifact body. It lives at the
+          # workspace root — NOT under .scan/ — so the raw scanner reports (which may carry
+          # secret locations / source snippets) can never be swept into the upload.
+          echo "$PAYLOAD" | jq . > scan-posture.json
+
+          echo "Built scan posture for ${GITHUB_REPOSITORY}@${HEAD_SHA}:"
+          jq . scan-posture.json   # counts only — safe to log; contains no secrets
+
+      - name: Upload scan posture artifact (issue #106 Option A)
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          # MUST equal the connector default GITHUB_SCAN_ARTIFACT_NAME — the Foundry
+          # GitHub connector looks the artifact up by this exact name.
+          name: cobenian-scan-posture
+          # Exactly ONE file → the artifact contains exactly one JSON body, as the
+          # connector's parser requires.
+          path: scan-posture.json
+          if-no-files-found: warn
+          retention-days: 7
