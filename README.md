@@ -71,6 +71,48 @@ jobs:
 | `otp-version` | `29.0.1` | |
 | `postgres_image` | `postgres:17` | |
 | `gitleaks_version` | `8.21.2` | CLI binary (the action needs a paid org license) |
+| `foundry_events_url` | `https://console.cobenian.com/api/events` | Foundry inbound event ingest endpoint for the CI security-posture event (below). Only used when `FOUNDRY_INGEST_TOKEN` is set |
+
+### CI security-posture event (opt-in) → Foundry / Panel
+
+The reusable CI can emit a **CI-computed security & freshness posture** event to
+Foundry so **Cobenian Panel's app & security monitor** can fold it per repo + commit
+(tracked as **PANEL-SEC-042**). It is **opt-in and fully non-blocking**:
+
+- **Secret:** set `FOUNDRY_INGEST_TOKEN` on the repo (a workspace-scoped Foundry/Accounts
+  bearer, `aud: cobenian-foundry`) and it flows through the existing `secrets: inherit`.
+  **No token → the step is a no-op**; nothing else changes and no CI time is added.
+- **What it does:** after the build, it re-runs Sobelow, `mix deps.audit` (mix_audit),
+  `mix hex.audit`, gitleaks, and `mix hex.outdated` in machine-readable mode, folds their
+  results into one JSON payload, and `POST`s it to `foundry_events_url`.
+- **Never a gate:** the emit step is `continue-on-error: true` and internally guarded, so
+  it can **never** fail a caller's build. The existing blocking scanner steps are unchanged.
+- **Event contract** (POST body → Foundry `POST /api/events`):
+
+  ```jsonc
+  { "name": "connectors.scan_result.received",   // Panel folds by payload.source
+    "subject": "repo:<owner>/<repo>",
+    "payload": {
+      "source": "github",                        // links to the repo/workflow_run events
+      "repo": "<owner>/<repo>", "head_sha": "…", "run_url": "…",
+      "workflow_run_id": "…", "scanned_at": "<ISO8601>",
+      "sobelow":      { "findings": N, "by_confidence": { "high": N, "medium": N, "low": N } },
+      "mix_audit":    [ { "package": "…", "id": "CVE/GHSA", "severity": "…", "title": "…" } ],
+      "hex_audit":    [ { "package": "…", "version": "…", "reason": "…" } ],
+      "gitleaks":     { "secrets_found": N },     // COUNT ONLY — never a value or location
+      "hex_outdated": [ { "package": "…", "current": "…", "latest": "…" } ]
+    } }
+  ```
+
+  A scanner that did not run or failed is **omitted** (null) — never fabricated as clean.
+  Per cobenian-foundry **CON-GH-015**, no secret values, secret locations, or source
+  snippets are ever emitted (gitleaks/Sobelow contribute counts only).
+
+> **Foundry-side confirmation needed.** `connectors.scan_result.received` is a **new**
+> connector resource name (not one of SPEC-CON-003 §6's five) and CI emits it via the
+> generic authenticated `POST /api/events` surface rather than the connector's own
+> ingest. If Foundry prefers a dedicated ingest route/HMAC or a different name/source,
+> adjust `foundry_events_url` + the emit step and tell Panel so its fold stays aligned.
 
 ## ⚠️ Branch-protection check name
 
