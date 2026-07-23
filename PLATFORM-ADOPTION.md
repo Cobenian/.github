@@ -34,12 +34,12 @@ What each product still writes for itself is a **facade** over those SDKs. As of
 2026-07-03 four products wrote four different facades — diverging on shape,
 normalization, token threading, error mapping, and config keys, with two latent
 bugs traced directly to that drift. This standard removes the drift by fixing
-**six conventions** and backing the mechanical ones with a shared kit
+**seven conventions** and backing the mechanical ones with a shared kit
 (`cobenian_core_platform`, §7).
 
 ---
 
-## 1. The six conventions
+## 1. The seven conventions
 
 ### C1 — One facade shape MUST be used
 
@@ -125,6 +125,24 @@ For a product that routes LLM calls through **Foundry Inference**:
   The shared kit provides a `use Cobenian.CorePlatform.Port` macro so the
   behaviour/stub wiring is identical everywhere.
 
+### C7 — Structured logging MUST use the shared kit
+
+- Products **MUST** emit **structured (JSON) logs** in deployed environments via
+  `Cobenian.CorePlatform.Logging`, and **MUST NOT** change call sites — code keeps
+  using the standard `Logger`. Enrichment happens below the call site: static fields
+  (`app`, `env`, `version`, `commit`) on primary metadata via
+  `Cobenian.CorePlatform.Logging.setup/1` at boot; per-request context
+  (`request_id`, `view_id`, `workspace_id`, source/forwarded IPs) via the shared
+  `Plug` (HTTP) and `LiveHook` (LiveView `on_mount`).
+- The endpoint's LiveView socket **MUST** declare `connect_info: [:peer_data,
+  :x_headers, …]` so socket logs carry the client IP; workspace-scoped background
+  jobs **SHOULD** stamp `workspace_id` from their args.
+- `COBENIAN_ENV` **MUST** be set per environment (e.g. `fly.toml [env]`) so `env`
+  populates; secrets/PII **MUST NOT** be logged (the formatter masks sensitive keys
+  as a backstop, not a licence). The field contract is
+  [`docs/logging.md`](https://github.com/Cobenian/cobenian-core-platform/blob/main/docs/logging.md);
+  transport stays stdout → the log shipper (apps do not self-ship).
+
 ---
 
 ## 2. Layer boundaries (what goes where)
@@ -157,6 +175,7 @@ A product's platform seam is conforming when all of the following hold:
 - [ ] Errors mapped via the shared mapper; no fabrication on failure (C4)
 - [ ] Inference tiers use named constants over the shared vocabulary (C5)
 - [ ] Config keys are `:foundry_client` / `:data_client`; tests use stubs (C6)
+- [ ] Structured logging via `Cobenian.CorePlatform.Logging` — `setup/1` at boot, the `Plug` + LiveView `LiveHook` wired, socket `connect_info` has `:peer_data`/`:x_headers`, `COBENIAN_ENV` set, no call-site changes (C7)
 - [ ] Out-of-scope layers (if any) are recorded as an ADR (§8 of STANDARDS)
 
 ---
@@ -188,6 +207,11 @@ behaviour`) keeps it from regressing, mirroring the CI ratchet in
 
 ## Changelog
 
+- **0.3 (2026-07-23)** — Added **C7 — structured logging** via
+  `Cobenian.CorePlatform.Logging` (JSON formatter + primary-metadata enrichment +
+  `Plug`/`LiveHook`, no call-site changes). Piloted end-to-end on Cadence
+  (app/env/version + request/view/workspace + source/forwarded IPs), backed by the
+  kit's field contract (`docs/logging.md`). Six conventions → seven.
 - **0.2 (2026-07-04)** — Refined from first implementations (Glean, Orbit). C4 no
   longer mandates collapse-to-`:unavailable`: products that *act on* a granular
   reason (Cadence ref resolution, Comms suppression) surface it via
