@@ -169,11 +169,40 @@ jobs:
       # gitleaks CLI binary, NOT gitleaks-action@v2 — the action requires a paid
       # license for organization accounts (Cobenian is an org); the binary is free.
       # Pin the version and bump deliberately. See STANDARDS.md §5.
+      # Cache the pinned gitleaks binary across runs, keyed on its version. On a hit
+      # the binary is restored to ./gitleaks and NO network fetch happens — the fewer
+      # times we hit the GitHub release CDN, the fewer chances a transient 5xx blip
+      # (as happened 2026-07-24) can touch the build. Both this blocking step and the
+      # non-blocking scan-posture step below reuse the same ./gitleaks.
+      - name: Cache gitleaks binary
+        uses: actions/cache@v5
+        with:
+          path: ./gitleaks
+          key: gitleaks-${{ runner.os }}-${{ inputs.gitleaks_version }}
+
       - name: gitleaks (secret scan)
         run: |
           v="${{ inputs.gitleaks_version }}"
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${v}/gitleaks_${v}_linux_x64.tar.gz" \
-            | tar -xz gitleaks
+          # Fetch the binary resiliently: a transient release-CDN 5xx (e.g. a 504) must
+          # NOT hard-fail CI — only real secret findings may. curl retries transient
+          # errors itself; the outer loop also covers a truncated tar extraction, and a
+          # clean ::error:: is emitted only if every attempt is exhausted. Separate the
+          # download from the extract (temp file, not a `curl | tar` pipe) so a partial
+          # body is never streamed into tar. Skipped entirely on a cache hit.
+          if [ ! -x ./gitleaks ]; then
+            url="https://github.com/gitleaks/gitleaks/releases/download/v${v}/gitleaks_${v}_linux_x64.tar.gz"
+            for attempt in 1 2 3; do
+              if curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 \
+                   -o gitleaks.tar.gz "$url" \
+                 && tar -xzf gitleaks.tar.gz gitleaks; then
+                break
+              fi
+              echo "gitleaks fetch attempt ${attempt}/3 failed" >&2
+              [ "$attempt" -lt 3 ] && sleep $((attempt * 5))
+            done
+            rm -f gitleaks.tar.gz
+          fi
+          [ -x ./gitleaks ] || { echo "::error::Could not fetch gitleaks v${v} after 3 attempts (transient download failure — not a secret finding)"; exit 1; }
           ./gitleaks detect --source . --redact --no-banner --exit-code 1
 
       # --- CI-computed security/freshness posture → workflow-run artifact (issue #106 Option A) ---
@@ -282,9 +311,14 @@ jobs:
 
           # --- gitleaks (secret scan): COUNT ONLY — never value or location ---
           GITLEAKS='null'
+          # Normally ./gitleaks already exists (cache hit or the blocking step above);
+          # only fetch as a last resort, and even then resiliently + non-fatally.
           if [ ! -x ./gitleaks ]; then
-            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-              | tar -xz gitleaks 2>/dev/null || true
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 \
+              -o gitleaks.tar.gz \
+              "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+              2>/dev/null && tar -xzf gitleaks.tar.gz gitleaks 2>/dev/null || true
+            rm -f gitleaks.tar.gz
           fi
           if [ -x ./gitleaks ]; then
             ./gitleaks detect --source . --redact --no-banner \
