@@ -60,7 +60,9 @@ jobs:
       # flyctl's default 5m machine-state timeout.
       - name: Deploy
         run: |
-          args="--remote-only --wait-timeout 15m"
+          # GIT_SHA build-arg stamps the deployed commit into logs (Core Platform C7 `commit` field).
+          # Backward-compatible: a Dockerfile without `ARG GIT_SHA` just ignores it (BuildKit warning).
+          args="--remote-only --wait-timeout 15m --build-arg GIT_SHA=${{ inputs.head_sha }}"
           if [ "${{ inputs.uses_hex_org_key }}" = "true" ]; then
             args="$args --build-secret hex_org_key=$HEX_ORG_KEY"
           fi
