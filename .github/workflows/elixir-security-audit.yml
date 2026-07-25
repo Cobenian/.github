@@ -1,0 +1,112 @@
+# Reusable weekly dependency-advisory scan. A thin per-repo caller triggers this
+# on a `schedule:` (see STANDARDS.md). It runs `mix hex.audit` against the repo's
+# committed `mix.lock` and, Dependabot-style, keeps ONE rolling GitHub issue in
+# sync with the findings:
+#   * advisories found  -> open the issue (or update it + comment)
+#   * clean             -> close the issue if one is open
+# The workflow itself stays green regardless (the issue is the signal), so a
+# no-fix-available advisory doesn't spam failure emails every week.
+#
+# Auth: mirrors elixir-ci.yml — private Cobenian Hex org via the HEX_ORG_KEY
+# secret (passed with `secrets: inherit`). Needs `issues: write`, which the
+# CALLER must grant (a reusable workflow can't grant itself more than its caller).
+name: Security Audit
+
+on:
+  workflow_call:
+    inputs:
+      elixir-version:
+        type: string
+        default: "1.20.0"
+      otp-version:
+        type: string
+        default: "29.0.1"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    name: hex.audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ inputs.elixir-version }}
+          otp-version: ${{ inputs.otp-version }}
+
+      # Private Cobenian Hex org (no-op when the secret is unset), before deps.get.
+      - name: Authenticate private Hex organization
+        env:
+          HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
+        run: |
+          if [ -n "$HEX_ORG_KEY" ]; then
+            mix hex.organization auth cobenian --key "$HEX_ORG_KEY"
+          fi
+
+      # hex.audit needs deps resolved (it reads the resolved tree, not just the lock).
+      - run: mix deps.get
+
+      - name: Run mix hex.audit
+        id: audit
+        run: |
+          set +e
+          mix hex.audit > audit.raw.txt 2>&1
+          code=$?
+          set -e
+          # Drop the private-org auth/deprecation noise so the issue body is clean.
+          grep -vaE 'authentication session (has )?expired|stored key is deprecated|For development|For CI|mix hex\.user auth|mix hex\.organization key|^[[:space:]]*$' audit.raw.txt > audit.txt || true
+          echo "---- hex.audit output ----"; cat audit.txt
+          # hex.audit exits non-zero when it finds retired/advisory packages.
+          if [ "$code" -ne 0 ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Sync advisory issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FOUND: ${{ steps.audit.outputs.found }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="🔒 Dependency security advisories (mix hex.audit)"
+          LABEL="security-audit"
+          TODAY="$(date -u +%Y-%m-%d)"
+
+          gh label create "$LABEL" --color "D93F0B" --description "Automated weekly mix hex.audit findings" 2>/dev/null || true
+
+          # Existing open, auto-managed issue for this repo (exact-title match on the label).
+          NUM="$(gh issue list --state open --label "$LABEL" --json number,title \
+                   --jq "map(select(.title == \"$TITLE\")) | .[0].number // empty")"
+
+          if [ "$FOUND" = "true" ]; then
+            {
+              echo "\`mix hex.audit\` flagged dependency advisories in **$REPO** (scheduled weekly scan, $TODAY)."
+              echo
+              echo '```'
+              cat audit.txt
+              echo '```'
+              echo
+              echo "Run: $RUN_URL"
+              echo
+              echo "_Auto-managed by the fleet Security Audit workflow — this issue is refreshed weekly and closes automatically once \`mix hex.audit\` is clean. \`mix deps.audit\` remains the blocking CVE gate on push/PR._"
+            } > issue.md
+
+            if [ -n "$NUM" ]; then
+              gh issue edit "$NUM" --body-file issue.md
+              gh issue comment "$NUM" --body "🔁 Still present as of $TODAY (weekly scan). $RUN_URL"
+              echo "Updated advisory issue #$NUM"
+            else
+              gh issue create --title "$TITLE" --label "$LABEL" --body-file issue.md
+              echo "Opened new advisory issue"
+            fi
+          else
+            if [ -n "$NUM" ]; then
+              gh issue comment "$NUM" --body "✅ Resolved — \`mix hex.audit\` is clean as of $TODAY. Closing (the weekly scan will reopen if anything returns)."
+              gh issue close "$NUM"
+              echo "Closed advisory issue #$NUM (now clean)"
+            else
+              echo "Clean — no advisories and no open issue. Nothing to do."
+            fi
+          fi
