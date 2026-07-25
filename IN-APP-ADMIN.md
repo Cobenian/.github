@@ -1,6 +1,6 @@
 # Cobenian In-App Admin Standard
 
-**Status:** Draft · **Version:** 0.1 · **Last updated:** 2026-07-25
+**Status:** Draft · **Version:** 0.2 · **Last updated:** 2026-07-25
 
 How a Cobenian product — every Phoenix app and every Panel instrument — exposes an
 **in-app admin surface**: the browser screens a workspace's own owners/admins use to
@@ -185,6 +185,15 @@ Cobenian Elixir/LiveView standards.
 the surface **MUST** present a clear labeled link to the correct Accounts screen rather
 than a partial local reimplementation.
 
+5.4. **Panel-hosted instruments.** A Panel instrument is its own product (PRODUCT-SURFACE
+§3), so its in-app admin is **per-instrument** — each instrument owns its A1–A6 concerns
+for a workspace. Panel, as the shared host/shell, **SHOULD** present these through **one
+admin surface** scoped to the instruments a workspace has enabled (a shared shell with a
+per-instrument section), rather than a separate admin app per instrument. The
+role/seat gate (§3), boundary (§2), and audit (§4) apply per instrument-product; Panel
+hosting them together **MUST NOT** merge their authorization or let one instrument's admin
+reach another's data.
+
 ---
 
 ## 6. Conformance checklist (per product / per instrument)
@@ -220,6 +229,9 @@ than a partial local reimplementation.
 
 ## Changelog
 
+- **0.2 (2026-07-25)** — Added §5.4: a Panel instrument is its own product, so its
+  in-app admin is per-instrument, surfaced through Panel's shared admin shell without
+  merging authorization (aligns with PRODUCT-SURFACE §3).
 - **0.1 (2026-07-25)** — Initial draft. The three-tier admin model, the six things
   in-app admin owns (A1–A6), the boundary of what it MUST NOT do, role/seat access
   control, audit, shared-shell/UX consistency, conformance checklist, and v1

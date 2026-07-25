@@ -1,6 +1,6 @@
 # Cobenian Product Surface Standard — REST, MCP & OAuth2 Exposure
 
-**Status:** Draft · **Version:** 0.1 · **Last updated:** 2026-07-25
+**Status:** Draft · **Version:** 0.2 · **Last updated:** 2026-07-25
 
 How a Cobenian product — every Phoenix app **and** every Panel instrument —
 **exposes its own programmatic surface** to callers: other Cobenian products,
@@ -19,7 +19,8 @@ predictable, testable, and cheap to extend.
 
 > **Scope.** Applies to every product that exposes a machine-callable surface —
 > Cadence, Orbit, Glean, Foresight, Steward, Companion, the Data APIs, Foundry, and
-> **each Panel instrument** (§10). A product with no external surface today still
+> **each Panel instrument** — which is its own product hosted by Panel, not an exception
+> (§3). A product with no external surface today still
 > adopts §1–§6 the moment it grows one. The **in-app admin** surface that governs a
 > product from a browser is a separate concern, specified in
 > [`IN-APP-ADMIN.md`](./IN-APP-ADMIN.md).
@@ -284,29 +285,41 @@ operator-provisioned per 2.2.
 
 ---
 
-## 3. Panel instruments
+## 3. Panel instruments are products; Panel is their host
 
-3.1. **Panel is one resource server hosting many instruments.** An instrument is a
-composition (`piece × lens × preset × capabilities`, SPEC-PANEL-SUB-001), not a separately
-deployed app, and Panel owns no authoritative business/PII data — an instrument's rows
-live in a Data API, read through product-owned facades. The **Panel app** is therefore the
-resource server: it resolves the Accounts Principal once at its edge (S2) and applies the
-tenant (S5) and entitlement (S6) gates.
+3.1. **Each Panel instrument is a product** under this standard — it has its own Accounts
+product slug, its own capability-scope namespace (`<instrument>:<resource>:<verb>`, S3),
+its own entitlement, its own OAuth-client / service-credential eligibility, and its own
+REST base path and MCP server identity, and it authorizes every caller itself (S1–S6)
+exactly as a standalone app does. There is **no** Panel-level surface exception: an
+instrument's surface conforms to S1–S12 on its own account.
 
-3.2. **Capabilities are still scope-gated per instrument.** Each instrument capability
-**MUST** map to a capability scope named for the instrument
-(`panel:<instrument>:<resource>:<verb>`, or `<instrument>:…`, chosen once and registered,
-S3), and the `act` checkpoint (S4) applies per capability. Resolving the Principal at
-Panel's edge is expected, but Panel **MUST NOT** let a dispatch to an instrument skip
-S1–S6: the scope, tenant, entitlement, and `act` checks for the invoked instrument
-capability **MUST** still run in the core before it acts.
+3.2. **Identity is separate from deployment.** Panel is the shared **host and shell** —
+the runtime that mounts instruments and the browser chrome (nav, session, launcher,
+shared components) they render within — **not** a shared resource server that terminates
+auth on an instrument's behalf. An instrument's product identity (slug, scopes,
+entitlement, audience, surface) is its own, independent of the fact that Panel currently
+hosts it in a shared runtime. Because identity was never Panel's, an instrument **MAY**
+later be extracted to its own deployment with **no** change to its contract, callers, or
+registration.
 
-3.3. **One surface, per-instrument scopes.** When Panel exposes REST or MCP, an
-instrument's operations are addressed through Panel's own surface and gated by that
-instrument's scopes; `tools/list` (S8) returns only the instrument capabilities the
-caller's Principal is scoped for. "Expose an instrument over MCP" is therefore the same
-work as adding a scoped tool — there is no per-instrument resource server, and no shared
-bypass either.
+3.3. **Panel-hosted ≠ Panel-authorized.** Hosting many instrument-products in one runtime
+is a deployment convenience; it **MUST NOT** collapse their authorization. Each
+instrument resolves its own Principal (S2) and runs its own scope, tenant, entitlement,
+and `act` checks (S3–S6) for the operation invoked. A shared plug/kit **MAY** perform the
+mechanical resolution, but the product slug an instrument checks entitlement against, and
+the scope namespace it enforces, are the **instrument's** — never a blanket "Panel"
+grant. `tools/list` (S8) for an instrument returns only that instrument's tools the
+Principal is scoped for.
+
+3.4. **Substrate is shared; products are distinct.** An instrument remains a composition
+over the shared piece vocabulary (`piece × lens × preset × capabilities`, SPEC-PANEL-SUB-001)
+and owns no authoritative business/PII data — its rows live in a Data API read through
+product-owned facades. That shared substrate is *code reuse*, orthogonal to product
+identity: instruments share the substrate and the runtime while remaining independently
+registered, entitled, and surfaced products. This is the class the platform tiers call
+**services** (narrow, Data-API-backed, Panel-hosted products), as distinct from **apps**
+(own data plane and own deployment, e.g. Steward, Companion, Cadence).
 
 ---
 
@@ -360,8 +373,9 @@ A product's outbound surface is conforming when:
 - [ ] Usage metered via Accounts; state-mutations audited & human-attributable; honest
       metrics only (S12).
 - [ ] Every registered scope has a consent-facing label/description (§2.3).
-- [ ] Panel resolves the Principal at its edge and enforces per-instrument scopes +
-      `act`/tenant/entitlement in the core with no dispatch bypass (§3).
+- [ ] Each Panel instrument is its own product (slug, scope namespace, entitlement, REST
+      base + MCP identity) authorizing its own callers; Panel hosts, it does not
+      authorize; identity is separate from deployment (§3).
 
 ---
 
@@ -383,6 +397,11 @@ Explicitly deferred; **MUST NOT** be assumed by v1 conformance:
 
 ## Changelog
 
+- **0.2 (2026-07-25)** — §3 reframed: **each Panel instrument is its own product**
+  (own slug, scope namespace, entitlement, REST base + MCP identity) that authorizes its
+  own callers, with Panel as the shared host/shell — **identity separate from
+  deployment**. Replaces the earlier "Panel is one resource server hosting scope-gated
+  surfaces" model. Names the **services vs apps** product classes.
 - **0.1 (2026-07-25)** — Initial draft. Twelve surface conventions (S1–S12), the
   first/third-party + consent-gap section, Panel-instrument conformance, relationship to
   the other standards, conformance checklist, and v1 out-of-scope. Generalizes the
