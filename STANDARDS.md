@@ -224,6 +224,17 @@ to a threshold once the codebase is substantial.
 - **Migrations** live in the domain app (e.g. `apps/cobenian_companion`); point the
   duplicate-migration check at that path.
 
+### 3.4 Log-attribution guard (spawned processes)
+A spawned `Task`/process does **not** inherit the caller's per-process `Logger`
+metadata, so one that logs inside an attributed request or job emits lines with no
+`user_id`/`workspace_id`/`actor`. Every app that depends on `cobenian_core_platform`
+**must** enable the `UnattributedSpawn` credo check, which flags such spawns so they
+get wrapped in `Cobenian.CorePlatform.Logging.with_context/1` (or re-apply metadata
+inline). Start from [`templates/credo.exs`](templates/credo.exs); CI asserts both that
+the check is enabled **and** that it's loaded via `requires:` — the check ships behind
+`if Code.ensure_loaded?(Credo.Check)` and credo isn't on the dep's compile path, so
+without the `requires:` entry credo silently ignores it and the guard is inert.
+
 ---
 
 ## 4. CD — `.github/workflows/fly-deploy.yml` (applications only)

@@ -116,6 +116,30 @@ jobs:
           grep -q 'RELEASE_NODE' rel/env.sh.eex || { echo "::error::rel/env.sh.eex does not set RELEASE_NODE."; exit 1; }
           echo "Clustering config present with a stable node basename."
 
+      # Log attribution: a spawned Task/process does NOT inherit the caller's Logger metadata,
+      # so one that logs inside an attributed request/job produces unattributed lines. The fleet
+      # UnattributedSpawn credo check (shipped in cobenian_core_platform) catches that — but only
+      # if it's enabled AND actually loaded. It ships behind `if Code.ensure_loaded?(Credo.Check)`
+      # and credo isn't on the dep's compile path, so a `.credo.exs` `requires:` entry is needed
+      # or credo silently "Ignores an undefined check" and the guard is inert. Assert both here so
+      # a new app can't forget it. See STANDARDS.md §3 + templates/credo.exs.
+      - name: Log-attribution guard (.credo.exs UnattributedSpawn)
+        if: ${{ inputs.profile == 'app' }}
+        run: |
+          if ! grep -rlq --include=mix.exs 'cobenian_core_platform' . 2>/dev/null; then
+            echo "App does not depend on cobenian_core_platform — spawn-attribution guard not applicable."; exit 0
+          fi
+          [ -f .credo.exs ] || { echo "::error::.credo.exs is missing — can't enable the UnattributedSpawn log-attribution guard. Run 'mix credo.gen.config' and start from Cobenian/.github templates/credo.exs. See STANDARDS.md §3."; exit 1; }
+          if ! grep -q 'Cobenian.CorePlatform.Logging.Credo.UnattributedSpawn' .credo.exs; then
+            echo "::error::.credo.exs does not enable the UnattributedSpawn guard — a spawned Task/process that logs would go unattributed. Add {Cobenian.CorePlatform.Logging.Credo.UnattributedSpawn, []} to checks.enabled (see templates/credo.exs). STANDARDS.md §3."
+            exit 1
+          fi
+          if ! grep -q 'core_platform/logging/credo' .credo.exs; then
+            echo "::error::.credo.exs enables UnattributedSpawn but never loads it via requires: — credo silently ignores it and the guard is inert. Add the dep source to requires: (deps/cobenian_core_platform/lib/cobenian/core_platform/logging/credo/unattributed_spawn.ex). See templates/credo.exs + STANDARDS.md §3."
+            exit 1
+          fi
+          echo "UnattributedSpawn log-attribution guard enabled and loaded."
+
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: ${{ inputs.elixir-version }}
