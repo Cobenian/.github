@@ -94,6 +94,28 @@ jobs:
           fi
           echo "No duplicate migration versions."
 
+      # Fly clustering: an app running DNSCluster MUST name its node by a STABLE basename
+      # (the release name), or its machines never cluster and LiveView reconnect-loops the
+      # moment a 2nd machine autostarts. This was a silent, fleet-wide gap (DNSCluster
+      # present, node-naming missing or keyed on the per-deploy image ref). Catch it here
+      # instead of in prod. See STANDARDS.md §4 + templates/rel-env.sh.eex.
+      - name: Fly clustering config (rel/env.sh.eex)
+        if: ${{ inputs.profile == 'app' }}
+        run: |
+          if [ -z "$(grep -rl 'DNSCluster' apps lib 2>/dev/null | head -1)" ]; then
+            echo "No DNSCluster — clustering config not required."; exit 0
+          fi
+          if [ ! -f rel/env.sh.eex ]; then
+            echo "::error::App uses DNSCluster but rel/env.sh.eex is missing — its Fly machines won't cluster (LiveView reconnect-loops on >1 machine). Copy Cobenian/.github templates/rel-env.sh.eex. See STANDARDS.md §4."
+            exit 1
+          fi
+          if grep -q 'FLY_IMAGE_REF' rel/env.sh.eex; then
+            echo "::error::rel/env.sh.eex keys the node name on FLY_IMAGE_REF — that changes every deploy, so the machines never match and Node.list() stays empty. Name the node by the release name (<%= @release.name %>)."
+            exit 1
+          fi
+          grep -q 'RELEASE_NODE' rel/env.sh.eex || { echo "::error::rel/env.sh.eex does not set RELEASE_NODE."; exit 1; }
+          echo "Clustering config present with a stable node basename."
+
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: ${{ inputs.elixir-version }}
