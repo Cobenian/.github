@@ -3,6 +3,17 @@
 This is the org-special **`Cobenian/.github`** repo — the single source of truth
 that all Cobenian repos inherit from, implementing [`STANDARDS.md`](STANDARDS.md) §9.
 
+## Standards
+
+The canonical, org-wide normative docs (RFC 2119). Every product cites these.
+
+| Doc | Governs |
+|---|---|
+| [`STANDARDS.md`](STANDARDS.md) | How repos are built and shipped (GitHub, CI, CD) |
+| [`PLATFORM-ADOPTION.md`](PLATFORM-ADOPTION.md) | How a product **consumes** the platform (inbound: product → Accounts/Foundry/Data) |
+| [`PRODUCT-SURFACE.md`](PRODUCT-SURFACE.md) | How a product **exposes** itself (outbound: REST, MCP, OAuth2 — caller → product) |
+| [`IN-APP-ADMIN.md`](IN-APP-ADMIN.md) | The in-app admin surface each product owns (tier 3 of 3) |
+
 ## Layout
 
 ```
