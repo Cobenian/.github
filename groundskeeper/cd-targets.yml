@@ -1,0 +1,129 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# cd-targets.yml — Fleet CD-target / blast-radius allowlist
+#
+# Single source of truth for "what does merging to a repo's default branch
+# PRODUCE, and how reversible is it." Consumed by the Groundskeeper
+# dependency-bump lane (SPEC-PANEL-GKI-DEP-001 §3.3) to decide which repos an
+# unattended lane may ever act on — but it is useful on its own TODAY as a
+# blast-radius map for incident response, audits, and onboarding.
+#
+# cd_target values:
+#   fly_deploy     — merging deploys a Fly app. REVERSIBLE (redeploy prior release).
+#   hex_publish    — merging/tagging publishes a Hex library. IRREVERSIBLE
+#                    (Hex has no unpublish; recovery is retire + fixed release).
+#   control_plane  — suite-wide control plane (identity, DNS, secrets, fleet CI/CD).
+#                    NEVER auto-eligible, any change class (spec §4.2).
+#   none           — not a deployable/publishable target (static assets, etc.).
+#
+# FAIL-SAFE: any repo absent from `repos` is treated as human-only (default below).
+#
+# auto_eligible is `false` everywhere for now: the lane is not built, and even
+# once it is, autonomy is EARNED from a :suggest start (PANEL-GKI-081) — this
+# flag is a hard gate, not a grant.
+#
+# A CI drift-check (TODO, spec §3.3.1) should verify each repo's real CD workflow
+# (fly-deploy.yml vs. a hex.publish release.yml) matches its declared cd_target.
+# Classification below was derived by inspecting each repo's .github/workflows
+# on 2026-07-25. Entries marked `review:` need a human decision before enabling.
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: 1
+
+default:
+  cd_target: none
+  auto_eligible: false
+  note: "Unlisted repos are human-only (fail-safe)."
+
+repos:
+  # ── Fly apps (rollback-able) ────────────────────────────────────────────────
+  cobenian-panel:
+    cd_target: fly_deploy
+    auto_eligible: false
+    note: "Phoenix app on Fly (reusable fly-deploy.yml). Hosts the Groundskeeper."
+  cobenian-logs:
+    cd_target: fly_deploy
+    auto_eligible: false
+    note: "Fleet log aggregator on Fly."
+  cobenian-log-shipper:
+    cd_target: fly_deploy
+    auto_eligible: false
+    note: "Vector shipper; self-contained `flyctl deploy` (not the reusable wf)."
+  cobenian-steward:
+    cd_target: fly_deploy
+    auto_eligible: false
+  cobenian-cadence:
+    cd_target: fly_deploy
+    auto_eligible: false
+  cobenian-glean:
+    cd_target: fly_deploy
+    auto_eligible: false
+  cobenian-orbit:
+    cd_target: fly_deploy
+    auto_eligible: false
+  cobenian-foresight:
+    cd_target: fly_deploy
+    auto_eligible: false
+  cobenian-agents:
+    cd_target: fly_deploy
+    auto_eligible: false
+  cobenian_companion_umbrella:
+    cd_target: fly_deploy
+    auto_eligible: false
+    note: >-
+      A bump merge triggers only the Fly web deploy (rollback-able). The agent
+      binary ships separately via the `agent-v*` TAG release to object storage
+      (agent-release.yml) — that path is human-initiated and out of the bump lane.
+  cobenian-foundry:
+    cd_target: fly_deploy
+    auto_eligible: false
+    review: >-
+      CANDIDATE control_plane — brokers connector credentials/actions and mints
+      service tokens for the whole suite. Confirm whether bumps here must be
+      human-only despite being a rollback-able Fly app.
+  cobenian-data-apis:
+    cd_target: fly_deploy
+    auto_eligible: false
+    review: >-
+      CANDIDATE control_plane — shared data plane for the suite. Confirm whether
+      bumps here must be human-only.
+
+  # ── Hex libraries (irreversible publish → human-only in M1) ─────────────────
+  cobenian-core-accounts:
+    cd_target: hex_publish
+    auto_eligible: false
+    note: "Private cobenian_core_accounts lib; release.yml → `mix hex.publish`."
+  cobenian-core-foundry:
+    cd_target: hex_publish
+    auto_eligible: false
+  cobenian-core-data-apis:
+    cd_target: hex_publish
+    auto_eligible: false
+  cobenian-core-platform:
+    cd_target: hex_publish
+    auto_eligible: false
+  cobenian-sensor-client:
+    cd_target: hex_publish
+    auto_eligible: false
+    note: >-
+      Library profile (CI-only, "no deploy"); no release.yml yet, so nothing is
+      published today. Classed hex_publish for when a release workflow lands.
+
+  # ── Control plane (never auto-eligible) ─────────────────────────────────────
+  cobenian-accounts:
+    cd_target: control_plane
+    auto_eligible: false
+    note: >-
+      Deploys via Fly, but is the identity/auth control plane
+      (accounts.cobenian.com). Human-only always (spec §4.2).
+  cobenian-dotgithub:
+    cd_target: control_plane
+    auto_eligible: false
+    note: >-
+      This repo (Cobenian/.github) — no app of its own; it IS the shared CI/CD
+      and reusable workflows governing the whole fleet. Human-only always.
+
+  # ── Not deployed ────────────────────────────────────────────────────────────
+  cobenian-product-logos:
+    cd_target: none
+    auto_eligible: false
+    note: "Static brand assets (svg/html); no workflows, nothing to deploy."
