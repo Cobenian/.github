@@ -31,6 +31,7 @@ templates/                 # COPY these into each consumer repo (not inherited)
   dependabot-app.yml       # → .github/dependabot.yml  (apps)
   dependabot-library.yml   # → .github/dependabot.yml  (libraries)
   CODEOWNERS               # → .github/CODEOWNERS       (not inheritable)
+  credo.exs                # → .credo.exs              (apps; ships the fleet log-attribution guard)
 ```
 
 ### Inherited automatically (org defaults)
