@@ -1,0 +1,80 @@
+# Weekly fleet-wide roll-up of the per-repo `security-audit` advisory issues into
+# ONE rolling "🔒 Fleet security status" issue in this repo — so you get a single
+# place (and a notification, via the cc @-mention on findings) instead of having
+# to watch all 13 repos.
+#
+# Runs after the per-repo audits (those fire Mon 13:23 UTC). Needs a repo/org
+# secret `FLEET_AUDIT_TOKEN` — a token that can READ issues across the Cobenian
+# org (a workflow's built-in GITHUB_TOKEN only sees this repo). The built-in
+# token still does the WRITE (posting the digest issue here), so the PAT can be
+# minimal: Issues=read + Metadata=read, org-wide. See STANDARDS.md.
+name: Fleet Security Digest
+
+on:
+  schedule:
+    - cron: "0 14 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write # post/update the digest issue in THIS repo
+
+jobs:
+  digest:
+    name: Roll up advisory issues
+    runs-on: ubuntu-latest
+    steps:
+      # 1) Cross-repo READ needs the org-scoped PAT (built-in token can't see
+      #    other private repos' issues). No-op-safe: if the secret is unset the
+      #    job fails loudly, which is the right signal that the token is missing.
+      - name: Fetch open advisory issues across the org
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_AUDIT_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::FLEET_AUDIT_TOKEN is not set — add a token with org-wide Issues:read (see workflow header)."
+            exit 1
+          fi
+          gh search issues --owner Cobenian --label security-audit --state open \
+            --limit 100 --json repository,title,url,updatedAt > found.json
+          echo "count=$(jq 'length' found.json)" >> "$GITHUB_OUTPUT"
+        id: fetch
+
+      # 2) Render the digest and post/update the single rolling issue with the
+      #    built-in token (issues:write on this repo).
+      - name: Render + post digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          COUNT: ${{ steps.fetch.outputs.count }}
+        run: |
+          TODAY="$(date -u +%Y-%m-%d)"
+          {
+            echo "Weekly roll-up of open \`security-audit\` advisory issues across the Cobenian fleet ($TODAY)."
+            echo
+            if [ "$COUNT" -eq 0 ]; then
+              echo "✅ **All clear** — no repo has open dependency advisories from \`mix hex.audit\`."
+            else
+              echo "⚠️ **$COUNT repo(s) with open advisories:**"
+              echo
+              echo "| Repo | Issue | Last updated |"
+              echo "|------|-------|--------------|"
+              jq -r 'sort_by(.repository.name) | .[] | "| \(.repository.name) | [\(.title)](\(.url)) | \(.updatedAt[0:10]) |"' found.json
+            fi
+            echo
+            echo "_Per-repo \`mix hex.audit\` runs weekly and keeps its own rolling issue; this rolls them up. GitHub's org **Security overview** natively aggregates Dependabot alerts (Hex/actions/docker). Auto-updated by \`fleet-security-digest.yml\`._"
+            if [ "$COUNT" -gt 0 ]; then echo; echo "cc @brweber2"; fi
+          } > digest.md
+
+          TITLE="🔒 Fleet security status"
+          LABEL="fleet-security-digest"
+          gh label create "$LABEL" --repo "$REPO" --color "5319E7" --description "Weekly fleet security roll-up" 2>/dev/null || true
+          NUM="$(gh issue list --repo "$REPO" --state open --label "$LABEL" --json number,title \
+                   --jq "map(select(.title == \"$TITLE\")) | .[0].number // empty")"
+          if [ -n "$NUM" ]; then
+            gh issue edit "$NUM" --repo "$REPO" --body-file digest.md
+            echo "Updated digest issue #$NUM"
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --label "$LABEL" --body-file digest.md
+            echo "Opened digest issue"
+          fi
