@@ -1,0 +1,18 @@
+#!/bin/sh
+# Cluster the release over Fly's private 6PN network (see Cobenian STANDARDS.md).
+#
+# The node MUST be named by a STABLE basename that is identical on every machine of the
+# app, because DNSCluster connects to `<local-node-basename>@<resolved-ip>` after resolving
+# `${FLY_APP_NAME}.internal`. Using the release name (stable, baked at build) achieves that.
+# (An earlier variant keyed the basename on the image ref — that changes per deploy and the
+# machines never matched, so Node.list() stayed empty. The release name is proven to cluster.)
+if [ -n "$FLY_PRIVATE_IP" ]; then
+  export ERL_AFLAGS="-proto_dist inet6_tcp"
+  export ECTO_IPV6="true"
+  export RELEASE_DISTRIBUTION="name"
+  export RELEASE_NODE="<%= @release.name %>@${FLY_PRIVATE_IP}"
+  export DNS_CLUSTER_QUERY="${FLY_APP_NAME}.internal"
+fi
+
+# Non-Fly (local/CI) fall back to the release default.
+export RELEASE_NODE=${RELEASE_NODE:-<%= @release.name %>@$(hostname)}

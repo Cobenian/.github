@@ -282,6 +282,27 @@ Secrets `FLY_API_TOKEN` (required) and `HEX_ORG_KEY` (optional) flow through
 `secrets: inherit`. Like the reusable CI, the deploy workflow is pinned by tag
 (`@v1`); bump deliberately.
 
+### 4.1 Clustering (required for every app running DNSCluster)
+
+Every deployable Phoenix app **must** ship `rel/env.sh.eex` (copy
+[`templates/rel-env.sh.eex`](templates/rel-env.sh.eex) verbatim — it is app-agnostic).
+Fly provides the private 6PN network and `<app>.internal` DNS, but Erlang clustering is
+**not** automatic: the node must be named by a **stable basename over IPv6** so it matches
+what DNSCluster dials.
+
+- Name the node `<%= @release.name %>@$FLY_PRIVATE_IP` (release name is stable and
+  identical on every machine). **Never** key the basename on `$FLY_IMAGE_REF` — it changes
+  per deploy, so the machines never match and `Node.list()` stays empty.
+- Set `RELEASE_DISTRIBUTION=name`, `ERL_AFLAGS="-proto_dist inet6_tcp"`,
+  `DNS_CLUSTER_QUERY=$FLY_APP_NAME.internal`.
+
+Why it matters: without correct clustering, a LiveView app **reconnect-loops** (blue
+progress bar every few seconds, full page reload) the moment a second machine autostarts —
+a long-poll/reconnect landing on the other, un-clustered node can't find its process. It is
+**silent until you scale**, so the reusable CI (§3) fails any app that runs DNSCluster
+without a valid `rel/env.sh.eex`. Verify after deploy with two started machines:
+`fly ssh console -a <app> -C "/app/bin/<rel> rpc 'IO.inspect(Node.list())'"` — expect a peer.
+
 **Migrations on deploy:** run via the Fly **release command** (`mix ecto.migrate`
 in the release), configured in `fly.toml` / the release module — not in the
 workflow.
