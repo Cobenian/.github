@@ -1,6 +1,6 @@
 # Cobenian Product Surface Standard — REST, MCP & OAuth2 Exposure
 
-**Status:** Draft · **Version:** 0.2 · **Last updated:** 2026-07-25
+**Status:** Draft · **Version:** 0.3 · **Last updated:** 2026-08-02
 
 How a Cobenian product — every Phoenix app **and** every Panel instrument —
 **exposes its own programmatic surface** to callers: other Cobenian products,
@@ -92,7 +92,7 @@ tenant model below (product-facing-api §5.10.4).
 ### S3 — The product owns its capability-scope vocabulary; Accounts carries it
 
 A product's surface **MUST** be gated by **capability scopes** it defines, named
-`"<product>:<resource>:<verb>"`, lowercase and stable (e.g. `cadence:decisions:read`,
+`"<namespace>:<resource>:<verb>"`, lowercase and stable (e.g. `cadence:decisions:read`,
 `glean:documents:write`). The product **MUST** register its scopes in the Accounts
 **product-scope registry** (product-facing-api §5.9.2, via the Platform Admin console);
 Accounts carries and grants them but does not interpret them.
@@ -101,6 +101,30 @@ Each REST endpoint and each MCP tool **MUST** declare the single capability scop
 requires. A request whose Principal lacks that scope **MUST** be rejected `403
 scope_denied`. The check **MUST** be enforced in the core (S1), server-side,
 deny-by-default — never only in a controller, a tool description, or the UI.
+
+**S3.1 — Naming.** A scope **MUST** be two or more colon-separated lowercase segments:
+`[a-z0-9-]` in the first, `[a-z0-9_-]` in the rest. New vocabulary **SHOULD** use
+**hyphens**, not underscores, as the intra-segment word separator — that matches every
+other identifier in the platform (product, suite, tier and workspace slugs; the exchange
+audiences `cobenian-foundry` / `cobenian-data` / `accounts-api` that already ride in
+`aud`). Underscores remain **legal** and **MUST NOT** be rejected: `usage:write:on_behalf`
+is a shipped Accounts API scope, and renaming it would invalidate every issued token and
+every product's check. It is grandfathered, not a precedent.
+
+The namespace is the **registry slug of the product whose vocabulary this is** — which
+**MAY** be hyphenated and **need not** equal the Accounts product slug it is registered
+under. Panel registers `gather-information:questionnaires:read` under the `panel`
+product (§3.1); both spellings are correct and neither is a "Panel scope".
+
+Because both separators are legal, `x:link-tokens:mint` and `x:link_tokens:mint` are
+**distinct** scopes. A product **MUST NOT** rely on them being equivalent anywhere, and
+**MUST** declare the exact spelling it registered. Accounts refuses to register a *new*
+scope differing from one already registered for that product only by `-`/`_`, so a
+near-miss fails loudly at registration rather than silently at mint — but that guard is
+per-product and insert-only, so a product that declares one spelling and registers the
+other still fails closed at request time with a `403`. Declaration and registration
+**MUST** be copied from a single source (the product's own scope constant or registry
+module), never retyped.
 
 ### S4 — `act`-class scopes are user-only, enforced twice
 
@@ -351,8 +375,11 @@ A product's outbound surface is conforming when:
       thin adapters with no transport-only authorization path (S1).
 - [ ] Every request resolves to a `%Principal{}` via the Accounts boundary; `:user`
       vs `:service` is the only caller branch; no first/third-party branch (S2).
-- [ ] Capability scopes are `<product>:<resource>:<verb>`, registered in Accounts, and
+- [ ] Capability scopes are `<namespace>:<resource>:<verb>`, registered in Accounts, and
       each endpoint/tool declares and enforces exactly one (S3).
+- [ ] Scope spellings are hyphenated for new vocabulary, and the strings the product
+      declares are copied from one source rather than retyped against the registry — a
+      `-`/`_` mismatch is a distinct scope and fails closed at request time (S3.1).
 - [ ] `act`-class scopes are user-only and rejected for `:service` at request time on
       both transports (S4).
 - [ ] `workspace_id` comes from the path/tool-arg, is authorized against the Principal's
@@ -397,6 +424,14 @@ Explicitly deferred; **MUST NOT** be assumed by v1 conformance:
 
 ## Changelog
 
+- **0.3 (2026-08-02)** — **S3.1 scope naming** added: explicit character set, **hyphens
+  for new vocabulary** (`usage:write:on_behalf` grandfathered, underscores stay legal),
+  the namespace is the vocabulary owner's registry slug and **need not** equal the
+  Accounts product slug it registers under (Panel → `gather-information:*` under
+  `panel`), and `-`/`_` spellings are **distinct** scopes that must be copied from one
+  source. S3's pattern relabelled `<product>` → `<namespace>` to match §3.1. Prompted by
+  cobenian-accounts #268/#269, which widened the registry's format check to accept
+  hyphenated namespaces and added the near-miss guard.
 - **0.2 (2026-07-25)** — §3 reframed: **each Panel instrument is its own product**
   (own slug, scope namespace, entitlement, REST base + MCP identity) that authorizes its
   own callers, with Panel as the shared host/shell — **identity separate from
