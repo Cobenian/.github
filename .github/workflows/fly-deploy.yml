@@ -33,6 +33,14 @@ on:
         required: false
         type: boolean
         default: false
+      version_path:
+        description: >-
+          Optional path returning the running commit SHA (e.g. /version). When set, the deploy
+          asserts the live app reports `head_sha` — the only check that proves the intended code
+          is actually serving. Skipped when empty.
+        required: false
+        type: string
+        default: ""
     secrets:
       FLY_API_TOKEN:
         required: true
@@ -46,12 +54,55 @@ jobs:
   deploy:
     name: Deploy app
     runs-on: ubuntu-latest
+    # Serialize deploys per consumer repo so two in-flight deploys can't interleave. Queued
+    # rather than cancelled: cancelling mid-`flyctl deploy` can leave a rollout half-applied,
+    # and the freshness re-check below already prevents a queued-but-stale deploy from landing.
     concurrency: deploy-group
     steps:
+      # ── Freshness gate (the stale-deploy fix) ────────────────────────────────
+      #
+      # CD is `workflow_run`-triggered off CI completion, and CI runs take minutes. When two
+      # merges land close together, the OLDER commit's CI can finish AFTER the newer merge —
+      # firing a deploy that ships the older code over the newer, with a green check.
+      #
+      # Observed 2026-08-02 in cobenian-panel: PR #184 merged at 14:44; PR #183's CI finished at
+      # 14:45:28 and deployed its own (older) SHA. The run reported success and GitHub's run list
+      # labelled it with the NEWER sha, so nothing surfaced the regression — prod silently served
+      # the previous commit until the newer commit's own CI completed four minutes later.
+      #
+      # So: refuse to deploy anything that is no longer the tip of the default branch. This runs
+      # AFTER the concurrency slot is acquired, so a deploy that went stale while queued behind a
+      # newer one is caught here rather than overwriting it. `github.repository` inside a reusable
+      # workflow is the CALLER's repo, which is what we want.
+      #
+      # Skipping is always safe: whatever is now the tip has (or will have) its own CI + deploy.
+      - name: Check the commit is still the tip of the default branch
+        id: freshness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          branch=$(gh api "repos/$REPO" --jq .default_branch)
+          tip=$(gh api "repos/$REPO/commits/$branch" --jq .sha)
+
+          if [ "$tip" = "$HEAD_SHA" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+            echo "Deploying $HEAD_SHA (tip of $branch)."
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Deploy skipped (superseded)::\
+          $HEAD_SHA is no longer the tip of $branch (now $tip). Skipping to avoid deploying \
+          older code over newer. The tip commit deploys from its own CI run."
+          fi
+
       - uses: actions/checkout@v7
+        if: steps.freshness.outputs.fresh == 'true'
         with:
           ref: ${{ inputs.head_sha }} # deploy the exact validated SHA
       - uses: superfly/flyctl-actions/setup-flyctl@master
+        if: steps.freshness.outputs.fresh == 'true'
       # Retry once on a transient failure: the dominant flake is the Fly
       # `release_command` machine failing/hanging on cold start (host scheduling
       # or a Postgres cold-connect), which a plain re-run clears. Safe because
@@ -59,6 +110,7 @@ jobs:
       # `--wait-timeout 15m` rides out a slow cold start instead of tripping
       # flyctl's default 5m machine-state timeout.
       - name: Deploy
+        if: steps.freshness.outputs.fresh == 'true'
         run: |
           # GIT_SHA build-arg stamps the deployed commit into logs (Core Platform C7 `commit` field).
           # Backward-compatible: a Dockerfile without `ARG GIT_SHA` just ignores it (BuildKit warning).
@@ -74,9 +126,41 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
       - name: Smoke test
+        if: steps.freshness.outputs.fresh == 'true'
         run: |
           sleep 15
           curl -fsS "https://${{ inputs.app_domain }}${{ inputs.health_path }}" > /dev/null
           if [ -n "${{ inputs.ready_path }}" ]; then
             curl -fsS "https://${{ inputs.app_domain }}${{ inputs.ready_path }}" > /dev/null
           fi
+
+      # ── Prove the intended code is actually serving ──────────────────────────
+      #
+      # A green deploy is not evidence the change shipped. Neither is the Fly image label: it is
+      # set from the workflow input while the build uses the checkout, so the two can disagree —
+      # in the 2026-08-02 incident the label said the new sha and the running code was the old one.
+      # Only the app reporting its own commit closes that gap. Opt-in per consumer via
+      # `version_path`; consumers that expose no such endpoint keep the previous behavior.
+      - name: Verify the running release reports the deployed SHA
+        if: steps.freshness.outputs.fresh == 'true' && inputs.version_path != ''
+        env:
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -uo pipefail
+          url="https://${{ inputs.app_domain }}${{ inputs.version_path }}"
+
+          # Machines roll one at a time, so poll rather than sampling once.
+          for attempt in $(seq 1 20); do
+            body=$(curl -fsS "$url" 2>/dev/null || true)
+            case "$body" in
+              *"$HEAD_SHA"*)
+                echo "Verified: $url reports $HEAD_SHA."
+                exit 0 ;;
+            esac
+            sleep 15
+          done
+
+          echo "::error title=Deploy verification failed::\
+          $url never reported $HEAD_SHA (last response: ${body:-<none>}). The deploy reported \
+          success but the running release is serving different code — do not trust this deploy."
+          exit 1

@@ -288,10 +288,39 @@ jobs:
 | `health_path` | `/health` | liveness path curled after deploy |
 | `ready_path` | `""` | optional readiness path (e.g. `/readyz`); skipped when empty |
 | `uses_hex_org_key` | `false` | pass the private Cobenian Hex org key as a BuildKit build secret |
+| `version_path` | `""` | optional path returning the running commit SHA (e.g. `/version`); when set, the deploy asserts the live app reports `head_sha` |
 
 Secrets `FLY_API_TOKEN` (required) and `HEX_ORG_KEY` (optional) flow through
 `secrets: inherit`. Like the reusable CI, the deploy workflow is pinned by tag
 (`@v1`); bump deliberately.
+
+### 4.2 A deploy may be superseded — and a green deploy is not proof
+
+Two properties of this design bite together. Both are handled in the reusable workflow,
+so no app needs a change.
+
+**Deploys can run backwards.** CI takes minutes, and the deploy fires on CI
+*completion*. When two merges land close together, the older commit's CI can finish
+**after** the newer merge — firing a deploy that ships the older code over the newer.
+Observed 2026-08-02 in `cobenian-panel`: #184 merged at 14:44, #183's CI finished at
+14:45:28 and deployed its own older SHA; prod silently served the previous commit for
+four minutes, until #184's own CI completed. The reusable workflow now **refuses to
+deploy a SHA that is no longer the tip of the default branch**, re-checked *after* the
+`deploy-group` concurrency slot is acquired (a deploy can go stale while queued behind
+another). Skipping is always safe — whatever is now the tip deploys from its own CI run.
+
+**Neither the run status nor the image label proves what shipped.** In that incident the
+deploy went green, and `gh run list` reported the run's `headSha` as the *newer* commit
+(it reports the branch head at trigger time, not the payload's `head_sha`). The Fly image
+label agreed with it, because the label comes from the workflow input while the build
+comes from the checkout. The only honest signals were the `commit` field in the app's
+logs and the running code itself.
+
+So when diagnosing, read the deploy run's own log —
+`gh run view <id> --log | grep "head_sha:"` — for the SHA the reusable workflow actually
+received. And prefer `version_path`, which makes CI assert that the running release
+reports the SHA it claims; adding such an endpoint is the cheapest way to turn "did it
+ship?" into a single `curl`.
 
 ### 4.1 Clustering (required for every app running DNSCluster)
 
