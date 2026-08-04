@@ -180,9 +180,15 @@ jobs:
         run: mix credo --strict
         continue-on-error: ${{ contains(inputs.nonblocking, 'credo') }}
 
+      # `--skip` honours `@sobelow_skip ["Check.Name"]` on a function. Without it the
+      # annotation is silently inert, so a verified false positive has no way to be recorded
+      # in the code next to the mitigation that makes it false — the only alternatives being
+      # a repo-wide ignore list (too blunt: it hides genuine future findings of that check)
+      # or leaving sobelow non-blocking forever. Suppression stays per-function and reviewable
+      # in the diff.
       - name: sobelow (apps only)
         if: ${{ inputs.profile == 'app' }}
-        run: mix sobelow --exit --root ${{ inputs.sobelow_root }}
+        run: mix sobelow --exit --skip --root ${{ inputs.sobelow_root }}
         continue-on-error: ${{ contains(inputs.nonblocking, 'sobelow') }}
 
       - name: hex.audit (retired packages)
@@ -314,7 +320,10 @@ jobs:
           # --- Sobelow (apps only): counts + by_confidence, NO snippets ---
           SOBELOW='null'
           if [ "$PROFILE" = "app" ]; then
-            mix sobelow --format json --root "$SOBELOW_ROOT" > .scan/sobelow.json 2>/dev/null || true
+            # `--skip` matches the gate step above, so the digest's counts agree with what
+            # actually fails a build. Without it the digest would keep reporting findings CI
+            # treats as suppressed.
+            mix sobelow --format json --skip --root "$SOBELOW_ROOT" > .scan/sobelow.json 2>/dev/null || true
             if jq -e . .scan/sobelow.json >/dev/null 2>&1; then
               SOBELOW="$(jq '
                 (.findings.high_confidence // [] | length) as $h
