@@ -225,25 +225,29 @@ For a contract `C`, the generator **MUST** produce all of the following, and a p
 
 ---
 
-## 6. Open question — reconciling S8
+## 6. Scope-parity (resolved)
 
-PRODUCT-SURFACE **S8** says *"One tool per capability … MUST call the same core function
-the equivalent REST endpoint calls. A tool MUST NOT expose a capability the REST surface
-does not."*
+PRODUCT-SURFACE **S8** originally required *endpoint*-parity: *"One tool per capability …
+MUST call the same core function the equivalent REST endpoint calls. A tool MUST NOT
+expose a capability the REST surface does not."* `SPEC-PANEL-SURFACE-001` PANEL-SURF-024
+departed from it and flagged the departure as *"a Panel interpretation to reconcile
+upstream."*
 
-`SPEC-PANEL-SURFACE-001` PANEL-SURF-024 explicitly departs from this: MCP is the
-LLM-facing surface and MAY be a higher-level composition with no single REST equivalent,
-so parity is **scope-parity, not endpoint-parity** — flagged there as *"a Panel
-interpretation to reconcile upstream."* This document is upstream.
+**Resolved 2026-08-06: S8 is amended to scope-parity** (PRODUCT-SURFACE v0.4). The Panel
+interpretation is now the fleet rule, and this standard gives it structure.
 
-The `%Operation{}` model (C6) resolves it structurally: the shared spine is the **one
-declared scope vocabulary**, and `rest` / `mcp` are independent projections of it. A tool
-may compose several core calls and have no REST twin, but it **MUST** be gated by a scope
-from the same vocabulary, checked by the same core, with `act` user-only on both.
+- **C21 — One vocabulary, independent projections.** The shared spine between transports
+  is the product's **single declared scope vocabulary** (C5). An `%Operation{}`'s `rest`
+  and `mcp` projections (C6) are declared **independently**: an MCP tool **MAY** compose
+  several core functions and have no REST twin, and a REST resource **MAY** have no tool.
+  A projection **MUST NOT** introduce a capability class the vocabulary does not already
+  express, **MUST** be gated by exactly one scope from it, and **MUST** be checked by the
+  same core (C3). `act`-class stays user-only on both transports (S4).
 
-**This requires an S8 amendment and is not adopted by this draft.** Reviewer decision:
-amend S8 to scope-parity, or reject the Panel interpretation and require endpoint-parity
-fleet-wide. Everything else here holds either way.
+The invariant that survives the amendment is the one that mattered: **MCP adds a
+transport, never a new authorization or autonomy path.** What it gives up is the claim
+that an LLM-facing surface must be shaped like a CRUD surface, which was never true and
+was suppressing tool design.
 
 ---
 
@@ -298,6 +302,8 @@ Smallest blast radius first; each step independently shippable.
       declared (C6, C11).
 - [ ] One schema per operation, JSON Schema 2020-12, serving MCP, OpenAPI, and runtime
       validation alike (C8).
+- [ ] REST and MCP projections declared independently, both gated by scopes from the one
+      vocabulary, neither introducing a capability class it does not express (C21, S8).
 - [ ] OpenAPI 3.1 document generated, committed, and served; scope and `act`-class listed
       per operation (C10).
 - [ ] Webhook events feed the fleet catalog (C12); scope manifest generated (C13).
@@ -331,11 +337,12 @@ Smallest blast radius first; each step independently shippable.
 
 ## Changelog
 
-- **0.1 (2026-08-06)** — Initial draft. Twenty conventions (C1–C20): the contract module,
-  `%Operation{}` with independent REST/MCP projections over one scope vocabulary, a single
-  JSON Schema 2020-12 term across transports, seven generated artifacts, the
+- **0.1 (2026-08-06)** — Initial draft. Twenty-one conventions (C1–C21): the contract
+  module, `%Operation{}` with independent REST/MCP projections over one scope vocabulary,
+  a single JSON Schema 2020-12 term across transports, seven generated artifacts, the
   `core-platform` home with no `core-accounts` dependency, and drift-as-build-failure.
-  Hoists the `SPEC-PANEL-SURFACE-001` §3.4 declaration structs fleet-wide. Raises the S8
-  endpoint-parity vs scope-parity reconciliation (§6) without adopting either.
-  Prompted by an evaluation of ForkLaunch's manifest-driven generation model (fleet
-  evaluation note, 2026-08-06, held outside this repo).
+  Hoists the `SPEC-PANEL-SURFACE-001` §3.4 declaration structs fleet-wide. §6 adopts
+  **scope-parity** and lands the matching **S8 amendment** in PRODUCT-SURFACE v0.4,
+  closing the reconciliation PANEL-SURF-024 raised for upstream. Prompted by an
+  evaluation of ForkLaunch's manifest-driven generation model (fleet evaluation note,
+  2026-08-06, held outside this repo).
