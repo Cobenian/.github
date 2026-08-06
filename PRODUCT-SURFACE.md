@@ -1,6 +1,6 @@
 # Cobenian Product Surface Standard — REST, MCP & OAuth2 Exposure
 
-**Status:** Draft · **Version:** 0.3 · **Last updated:** 2026-08-02
+**Status:** Draft · **Version:** 0.4 · **Last updated:** 2026-08-06
 
 How a Cobenian product — every Phoenix app **and** every Panel instrument —
 **exposes its own programmatic surface** to callers: other Cobenian products,
@@ -204,10 +204,17 @@ byte-shaped alike (generalizing Cadence rest-api §3, §11–§14):
 A product that exposes an MCP surface **MUST** do so as a thin adapter over the same
 authorization core (S1), not as a parallel implementation:
 
-- **One tool per capability.** Each MCP tool **MUST** map to a product operation gated by
-  exactly one capability scope (S3), and **MUST** call the same core function the
-  equivalent REST endpoint calls. A tool **MUST NOT** expose a capability the REST
-  surface does not, and `act`-class tools obey S4 (usable only by a `:user` principal).
+- **Scope-parity, not endpoint-parity.** Each MCP tool **MUST** be gated by exactly one
+  capability scope drawn from the product's **single declared vocabulary** (S3), and
+  **MUST** reach the product's authorization core (S1) — never a parallel implementation
+  with weaker checks. A tool **MAY** be a higher-level, task-oriented composition of
+  several core functions with no single REST equivalent: MCP is the **LLM-facing**
+  surface (*"find the cases waiting on me"*) and REST the lower-level programmatic one,
+  so their operation sets are declared **independently** and neither is a mirror of the
+  other. What a tool **MUST NOT** do is introduce a capability class the scope vocabulary
+  does not already express, or reach a capability by a check the REST surface would deny
+  — MCP adds transports, never a new authorization or autonomy path. `act`-class tools
+  obey S4 (usable only by a `:user` principal), identically on every transport.
 - **Scope-filtered tool listing.** `tools/list` **MUST** return only the tools whose
   required scope the resolved Principal holds; a caller **MUST NOT** discover tools it
   could not invoke.
@@ -356,6 +363,11 @@ registered, entitled, and surfaced products. This is the class the platform tier
   surface's request logs.
 - [`IN-APP-ADMIN.md`](./IN-APP-ADMIN.md) — the browser admin that manages this surface
   (webhook endpoints, product policy, audit view, kill-switch).
+- [`PRODUCT-CONTRACT.md`](./PRODUCT-CONTRACT.md) — **how** a product declares the surface
+  this standard specifies, and what is generated from that declaration (routes, OpenAPI,
+  MCP tools, webhook catalog, the Accounts scope manifest, facade clients, the
+  conformance suite). This standard stays authoritative on semantics; that one is
+  authoritative on artifact provenance.
 - **Shared kit.** The mechanical parts of this standard — the `resolve_token` plug, the
   scope-enforcement guard, the error envelope, cursor pagination, the webhook
   registrar/signer/SSRF-guard, the MCP protected-resource metadata + tool dispatcher —
@@ -389,9 +401,10 @@ A product's outbound surface is conforming when:
       live before privileged action (S6).
 - [ ] REST is `/api/v1` JSON with the stable error envelope, idempotency keys, cursor
       pagination, correlation id, and `202`+resource for async (S7).
-- [ ] MCP tools map 1:1 to scoped operations over the same core, are scope-filtered in
-      `tools/list`, and the endpoint is an OAuth2 protected resource pointing at Accounts
-      (S8).
+- [ ] MCP tools are each gated by one scope from the product's single vocabulary and
+      reach the same core (scope-parity — a tool **may** be a composition with no REST
+      twin), are scope-filtered in `tools/list`, and the endpoint is an OAuth2 protected
+      resource pointing at Accounts (S8).
 - [ ] Outbound webhooks use the signed envelope, ownership verification, SSRF guard,
       auto-disable, and polling parity; distinct from notify/Comms (S9).
 - [ ] No product-local long-lived API credential; developer keys are Accounts service
@@ -424,6 +437,19 @@ Explicitly deferred; **MUST NOT** be assumed by v1 conformance:
 
 ## Changelog
 
+- **0.4 (2026-08-06)** — **S8 amended to scope-parity.** The first bullet was
+  endpoint-parity ("one tool per capability … MUST call the same core function the
+  equivalent REST endpoint calls; a tool MUST NOT expose a capability the REST surface
+  does not"). It now requires that every tool be gated by one scope from the product's
+  single declared vocabulary and reach the same core, while permitting a tool to be a
+  higher-level, task-oriented composition with **no REST twin** — MCP is the LLM-facing
+  surface, REST the lower-level programmatic one, and their operation sets are declared
+  independently. The invariant that survives is the one that mattered: MCP adds a
+  transport, never a new authorization or autonomy path, and `act`-class stays user-only
+  on every transport. Resolves the reconciliation `SPEC-PANEL-SURFACE-001` PANEL-SURF-024
+  raised for upstream. §5 checklist updated to match; §4 now points at the new companion
+  standard `PRODUCT-CONTRACT.md`, whose `%Operation{}` model gives the amended rule its
+  structure (independent `rest`/`mcp` projections over one scope vocabulary).
 - **0.3 (2026-08-02)** — **S3.1 scope naming** added: explicit character set, **hyphens
   for new vocabulary** (`usage:write:on_behalf` grandfathered, underscores stay legal),
   the namespace is the vocabulary owner's registry slug and **need not** equal the
