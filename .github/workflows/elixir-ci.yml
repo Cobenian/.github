@@ -146,7 +146,7 @@ jobs:
           otp-version: ${{ inputs.otp-version }}
 
       - name: Cache deps and _build
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             deps
@@ -208,7 +208,7 @@ jobs:
 
       # --- Dialyzer (report-only until dialyzer_blocking: true) ---
       - name: Cache Dialyzer PLTs
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: priv/plts
           key: ${{ runner.os }}-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-plt-v2-${{ hashFiles('**/mix.lock') }}
@@ -227,7 +227,7 @@ jobs:
       # (as happened 2026-07-24) can touch the build. Both this blocking step and the
       # non-blocking scan-posture step below reuse the same ./gitleaks.
       - name: Cache gitleaks binary
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ./gitleaks
           key: gitleaks-${{ runner.os }}-${{ inputs.gitleaks_version }}
@@ -425,7 +425,7 @@ jobs:
       - name: Upload scan posture artifact (issue #106 Option A)
         if: ${{ always() }}
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # MUST equal the connector default GITHUB_SCAN_ARTIFACT_NAME — the Foundry
           # GitHub connector looks the artifact up by this exact name.
