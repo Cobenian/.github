@@ -101,7 +101,13 @@ jobs:
         if: steps.freshness.outputs.fresh == 'true'
         with:
           ref: ${{ inputs.head_sha }} # deploy the exact validated SHA
-      - uses: superfly/flyctl-actions/setup-flyctl@master
+      # Pinned to a SHA, not `@master`. This step installs the binary that then
+      # runs with FLY_API_TOKEN against production, so a floating branch ref means
+      # any push to a third-party repo lands in every fleet deploy with no review.
+      # This SHA is what `@master` already resolved to, and is simultaneously the
+      # `v1` and `1.6` tags, so this is a hardening with no behaviour change.
+      # Dependabot keeps it current now that this repo is watched.
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1.6
         if: steps.freshness.outputs.fresh == 'true'
       # Retry once on a transient failure: the dominant flake is the Fly
       # `release_command` machine failing/hanging on cold start (host scheduling

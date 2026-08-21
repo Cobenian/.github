@@ -1,0 +1,22 @@
+# This repo defines CI (`elixir-ci.yml`), the scheduled advisory scan
+# (`elixir-security-audit.yml`), the fleet digest, and the deploy path
+# (`fly-deploy.yml`) for every app in the fleet — but until now nothing watched
+# the actions INSIDE those reusable workflows.
+#
+# That is the wrong way round. Consumer repos deliberately ignore
+# `Cobenian/.github/*` in their own dependabot.yml (the `@v1` float is how
+# hardening reaches them without a per-repo edit), so this file is the ONLY
+# place the third-party actions in the shared workflows can be kept current.
+# With no updater here they simply drifted: `actions/cache` sat on v5 with v6
+# released, `actions/upload-artifact` on v4 with v7 released.
+#
+# Note these updates land on `main`, but the fleet consumes the `v1` tag — a
+# merge here changes nothing until `v1` is moved. See STANDARDS.md.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly }
+    groups:
+      actions: { patterns: ["*"] }
