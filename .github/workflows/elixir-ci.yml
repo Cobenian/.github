@@ -47,10 +47,10 @@ on:
         default: "priv/repo/migrations"
       elixir-version:
         type: string
-        default: "1.20.0"
+        default: "1.20.3"
       otp-version:
         type: string
-        default: "29.0.1"
+        default: "29.0.5"
       postgres_image:
         type: string
         default: "postgres:17"

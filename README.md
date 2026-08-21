@@ -79,8 +79,8 @@ jobs:
 | `dialyzer_blocking` | `false` | Dialyzer is report-only by default; flip to `true` once PLTs are stable |
 | `sobelow_root` | `.` | `apps/<web_app>` for umbrellas |
 | `migrations_path` | `priv/repo/migrations` | duplicate-timestamp check target |
-| `elixir-version` | `1.20.0` | |
-| `otp-version` | `29.0.1` | |
+| `elixir-version` | `1.20.3` | |
+| `otp-version` | `29.0.5` | |
 | `postgres_image` | `postgres:17` | |
 | `gitleaks_version` | `8.21.2` | CLI binary (the action needs a paid org license) |
 
