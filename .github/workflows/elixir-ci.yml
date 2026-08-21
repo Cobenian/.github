@@ -172,6 +172,27 @@ jobs:
         run: mix deps.unlock --check-unused
       - name: format --check-formatted
         run: mix format --check-formatted
+      # `_build` is restored from a cache keyed on mix.lock, so it routinely crosses
+      # commits that change SOURCE without changing the lock. Compiling incrementally
+      # on top of those stale artifacts makes `--warnings-as-errors` non-deterministic
+      # in BOTH directions, and we have now been bitten both ways:
+      #
+      #   * False RED — cobenian-foundry 3f3bce1 (2026-08-21) failed here with
+      #     "incompatible types" against a struct that #491 had just gained a field on.
+      #     A re-run of the identical SHA passed, and a clean local build on the same
+      #     Elixir 1.20.3 produced ZERO warnings. The code was never wrong; the
+      #     restored `_build` was.
+      #   * False GREEN — the same mechanism can leave a caller's artifacts stale and
+      #     never re-check it, so a genuine warning is simply not emitted. That is the
+      #     dangerous direction, and it is silent.
+      #
+      # `mix clean` drops only THIS project's artifacts and leaves compiled
+      # dependencies in `_build` untouched, so every run type-checks all first-party
+      # code from scratch while keeping the expensive part of the cache. Measured on
+      # cobenian-foundry (21 umbrella apps, the fleet's largest): 8s, with zero
+      # dependency recompiles.
+      - name: clean first-party build artifacts (keep compiled deps)
+        run: mix clean
       - name: compile --warnings-as-errors
         run: mix compile --warnings-as-errors
 
