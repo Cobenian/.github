@@ -102,6 +102,15 @@ changes nothing on its own — `v1` must be retargeted at the new commit for the
 12 caller repos to pick it up. That retarget takes effect on every repo's next
 CI or deploy run at once, so treat it as a fleet-wide change, not a docs merge.
 
+`_build` is cached on `mix.lock`, which means it crosses commits that change source
+without changing the lock. Compiling incrementally on top of those artifacts makes
+`--warnings-as-errors` non-deterministic, so `elixir-ci.yml` runs **`mix clean`
+immediately before the compile gate**. That drops only first-party artifacts and keeps
+compiled dependencies, so the type check is honest and still cheap (8s on foundry, the
+fleet's largest umbrella). Do not "optimise" that step away — it has caught a false red
+(foundry 3f3bce1, 2026-08-21) and it is the only thing preventing the silent false-green
+case, where a stale caller is never re-checked and a real warning is never emitted.
+
 **Pipeline (order matters — cheapest/most-common failures first):**
 
 ```
