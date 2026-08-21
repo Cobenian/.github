@@ -76,11 +76,31 @@ branch protection (§7) requires the `Build and test` check.
 | Postgres service | `postgres:17` |
 | `actions/checkout` | `v7` |
 | `actions/cache` | `v5` |
+| `actions/upload-artifact` | `v4` |
 | `erlef/setup-beam` | `v1` |
+| `superfly/flyctl-actions/setup-flyctl` | SHA-pinned (`ed8efb3`, = `v1.6`) |
 
 `.tool-versions` is the single source of truth for the language pins (`erlang
 29.0.1`, `elixir 1.20.0`, `postgres 17.4`); CI mirrors it. Let Dependabot keep the
 action versions current.
+
+`setup-flyctl` is pinned to a **commit SHA**, not a tag, because that step
+installs the binary that then runs with `FLY_API_TOKEN` against production. It
+was previously on `@master` — a floating branch ref, so any push to a
+third-party repo would have landed in every fleet deploy unreviewed.
+
+Dependabot now watches THIS repo (`.github/dependabot.yml`). It has to: consumer
+repos deliberately ignore `Cobenian/.github/*` in their own configs, since the
+`@v1` float is how shared hardening reaches them without a per-repo edit. That
+makes this file the only place the third-party actions above can be kept current
+— and with no updater here they drifted (`actions/cache` v5 while v6 shipped,
+`actions/upload-artifact` v4 while v7 shipped). Those bumps are majors and are
+deliberately left for Dependabot to raise as individually reviewable PRs.
+
+**Moving the `v1` tag:** the fleet consumes `@v1`, so merging to `main` here
+changes nothing on its own — `v1` must be retargeted at the new commit for the
+12 caller repos to pick it up. That retarget takes effect on every repo's next
+CI or deploy run at once, so treat it as a fleet-wide change, not a docs merge.
 
 **Pipeline (order matters — cheapest/most-common failures first):**
 
