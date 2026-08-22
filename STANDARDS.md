@@ -351,6 +351,64 @@ received. And prefer `version_path`, which makes CI assert that the running rele
 reports the SHA it claims; adding such an endpoint is the cheapest way to turn "did it
 ship?" into a single `curl`.
 
+#### And once it *has* shipped: read the code from that SHA, not from your checkout
+
+`/version` answers *"did it ship?"*. The next question is almost always *"what does the
+running code do?"* — and that one is usually answered by reading a file in a local
+directory, which is a different question wearing the same clothes.
+
+**Any claim of the form "production does X because the code says so" reads the file at the
+SHA `/version` reports:**
+
+```
+git show '<served-sha>:path/to/file.ex'
+```
+
+A repo directory is just whatever branch it happens to be sitting on. `grep -rn` over a tree
+containing worktrees is worse: it spans branches nobody asked about and returns them with
+equal authority, ordered by directory name, with nothing in the output distinguishing `main`
+from someone's half-finished feature.
+
+**Four instances in one night, 2026-08-21/22, in two families.** The first two are *a fact
+true somewhere, cited as true in production*; the second two are ancestry run against the
+wrong operands:
+
+| | what went wrong |
+|---|---|
+| a line number cited for `connectors/sync/harvest.ex` | read `:160` from an **unmerged feature branch**; on the served `e55f9d7` the same entry is `:231` |
+| the same file read to settle what production emits | read from a local checkout at `0c53176` / `claude/decision-100`, **divergent** from `e55f9d7` — not merely behind it |
+| a deploy "confirmed" by `git merge-base --is-ancestor <served> <served>` | tautological — **passes for any input** |
+| a live change reported as unshipped | `--is-ancestor <branch-head> <served>` answers NO after a squash, because the branch head is never an ancestor of `main` |
+
+The third is the dangerous member of the family: it produces false *confidence* rather than
+false doubt, and it looks exactly like a real check. The fourth is its mirror, and cost a
+session an hour reporting a deployed fix as missing.
+
+Both are fixed by choosing the right subject: compare the **PR's merge commit** against the
+served SHA — `gh pr view N --json mergeCommit -q .mergeCommit.oid` — never a SHA against
+itself, never a branch head. Ancestry is a good tool; it is the operands that were wrong.
+
+#### A static read proves **today's** behaviour, and cannot settle a question about data that already exists
+
+This one survives any amount of care about SHAs. **You can read exactly the right SHA and
+still be answering the wrong question.**
+
+Events already emitted and rows already written were produced by an *older* build. So when
+the data predates the code you are reading, the source argument is **corroboration**, and
+something measured over the actual data has to carry the claim.
+
+**The test is how many assumptions each rests on.** On 2026-08-22 the question was whether a
+connector emitted a field as an explicit `null` or omitted the key:
+
+- *"the connector writes the key unconditionally"* — read from the source. Needs one
+  assumption: that emission has not changed since those events were written.
+- *"`key ABSENT: 0`"* — counted over the payloads a drain actually folded. Needs none.
+
+Fewer assumptions wins, so the measurement carries it and the source read explains *why* it
+came out that way. Both were true; only one was evidence. **Say which is which** — a document
+that presents corroboration as proof is harder to correct later than one that was simply
+wrong, because everything in it is accurate.
+
 ### 4.1 Clustering (required for every app running DNSCluster)
 
 Every deployable Phoenix app **must** ship `rel/env.sh.eex` (copy
