@@ -1,6 +1,6 @@
 # Cobenian Engineering Standards — GitHub, CI & CD
 
-**Status:** Adopted · **Version:** 1.6 · **Last updated:** 2026-06-22
+**Status:** Adopted · **Version:** 1.7 · **Last updated:** 2026-08-23
 
 The single reference for how Cobenian repositories are structured, tested,
 deployed, and governed. The goal is **consistency by default**: every repo looks
@@ -26,22 +26,85 @@ and behaves the same, so anyone can move between them without surprises.
 
 ## 1. Repository profiles
 
-Every repo is one of two profiles. The profile decides which parts of this
+Every repo is one of three profiles. The profile decides which parts of this
 standard apply. (An **umbrella** is still the *application* profile, with the
 invocation tweaks noted in §3.3.)
 
-| | **Application** | **Library** |
-|---|---|---|
-| Examples | cobenian-accounts, cobenian-cadence, cobenian_companion_umbrella (umbrella) | cobenian-core-accounts |
-| CI (format/compile/credo/test/dialyzer) | ✅ | ✅ |
-| Postgres in CI | ✅ (if it has a Repo) | only if it has DB-backed tests |
-| Sobelow (Phoenix SAST) | ✅ | ❌ (no web surface) |
-| Migration checks | ✅ (if it has migrations) | ❌ |
-| `/health` endpoint | ✅ | ❌ |
-| CD to Fly | ✅ | ❌ |
-| Hex publish workflow | ❌ | optional (on tags) |
-| Dependabot, gitleaks, mix_audit, hex.audit | ✅ | ✅ |
-| Branch protection + governance files | ✅ | ✅ |
+**Application** and **Library** are Elixir. **Client** is not — see §1.1.
+
+| | **Application** | **Library** | **Client** |
+|---|---|---|---|
+| Examples | cobenian-accounts, cobenian-cadence, cobenian_companion_umbrella (umbrella) | cobenian-core-accounts | cobenian-mobile |
+| Language / toolchain | Elixir | Elixir | TypeScript, React Native + Expo |
+| CI (format/compile/credo/test/dialyzer) | ✅ | ✅ | ❌ — equivalents in §1.1 |
+| Postgres in CI | ✅ (if it has a Repo) | only if it has DB-backed tests | ❌ |
+| Sobelow (Phoenix SAST) | ✅ | ❌ (no web surface) | ❌ |
+| Migration checks | ✅ (if it has migrations) | ❌ | ❌ |
+| `/health` endpoint | ✅ | ❌ | ❌ (not a service) |
+| CD to Fly | ✅ | ❌ | ❌ — **store submission, §1.1** |
+| Hex publish workflow | ❌ | optional (on tags) | ❌ |
+| Dependabot | ✅ mix | ✅ mix | ✅ **npm** |
+| gitleaks | ✅ | ✅ | ✅ |
+| mix_audit / hex.audit | ✅ | ✅ | ❌ — `npm audit` instead |
+| Branch protection + governance files | ✅ | ✅ | ✅ |
+| Reusable Elixir CI workflow (§9) | ✅ | ✅ | ❌ — cannot call it |
+
+---
+
+### 1.1 The Client profile
+
+A **client** is a repo that produces an artifact installed on someone else's
+device — today, `cobenian-mobile`. It is in this standard because governance,
+branching, and secret-scanning must not vary by language. Everything else does.
+
+**What carries over unchanged.** Squash-only merges · linear history ·
+auto-delete head branches · 0 required approving reviews · `main` always
+releasable · branch protection (§7) · gitleaks (§5) · Dependabot ·
+`CODEOWNERS` · PR and issue templates · Conventional Commits (§2).
+
+**What replaces the Elixir gate.** A client's `ci.yml` is its own — it does
+**not** call the reusable Elixir workflow (§9), which has no meaning here. The
+required status check is still named **`Build and test`** so §7's branch
+protection applies verbatim:
+
+| Elixir gate | Client equivalent |
+|---|---|
+| `mix format --check-formatted` | Prettier `--check` |
+| `mix compile --warnings-as-errors` | `tsc --noEmit` |
+| `mix credo --strict` | ESLint, no warnings |
+| `mix test` | the project's test runner |
+| `mix dialyzer` | — (TypeScript covers it) |
+| `mix deps.audit` / `hex.audit` | `npm audit --audit-level=high` |
+| `mix sobelow` | — (no web surface) |
+
+**What has no Elixir analogue — and matters most.** A client is the only profile
+where **merging to `main` does not ship anything**, and the only one that cannot
+be rolled back.
+
+1. **Releases are reviewed artifacts, not merges.** A build is submitted to a
+   store and approved by a third party — hours to days. Plan for it; do not
+   promise a same-day fix.
+2. **There is no hotfix path.** A bad build stays in users' hands until the next
+   one is approved. This is the single largest operational difference from every
+   other repo in the org, where merge-to-`main` auto-deploys and the remedy for a
+   bad deploy is another deploy.
+3. **Old versions persist for months.** Users do not upgrade on your schedule.
+   **Every server surface a client consumes is therefore a public API: additive
+   changes only.** Never remove a field, never re-type one, never tighten a
+   validation an old build would now fail. This constraint lands on the *server*
+   repos, not this one — a breaking change in Panel or Accounts breaks phones
+   that cannot be patched.
+4. **Ship a minimum-supported-version check in the first release.** The client
+   asks a server on launch whether it is too old and, if so, blocks with an
+   upgrade prompt. It is the only emergency brake a client has, and it **cannot
+   be retrofitted** — the builds that would need it are already in the field.
+5. **Store credentials are release infrastructure.** Signing keys, API keys, and
+   the review demo account are covered by §6 like any other secret. A demo
+   account that rots blocks every future release, so it is maintained, not
+   assumed.
+
+**Adoption.** A client repo satisfies §11's checklist with the §1.1 substitutions
+above. `profile:` in the §9 caller does not apply, because there is no caller.
 
 ---
 
@@ -671,6 +734,18 @@ Legend: ✅ done · ⚠️ partial/drift · ☐ not started · n/a not applicabl
 
 ## Changelog
 
+- **1.7 (2026-08-23)** — **Added the `Client` repo profile (§1, §1.1)** for repos
+  producing an artifact installed on someone else's device — first instance
+  `cobenian-mobile` (React Native + Expo). The standard previously assumed every
+  repo was Elixir, so a non-Elixir repo had no governed shape at all. Governance,
+  branching, branch protection and gitleaks carry over **unchanged**; the Elixir
+  gate is replaced by a per-language equivalent that keeps the required check
+  named `Build and test` so §7 applies verbatim. Records the three things no
+  Elixir profile has to reason about: **merge to `main` ships nothing**, **there
+  is no hotfix**, and **old versions persist for months — so every server surface
+  a client consumes is a public API, additive changes only.** That last one binds
+  the *server* repos, not the client. Also mandates a minimum-supported-version
+  check in a client's first release, because it cannot be retrofitted.
 - **1.6 (2026-06-22)** — **Adoption complete.** Refreshed the §10/§11 status tables
   to reflect reality: all five repos are on the reusable `@v1` workflow, every ratchet
   is promoted to blocking, and Oversight has migrated off both its `precommit` CI alias
