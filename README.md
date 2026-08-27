@@ -13,6 +13,7 @@ The canonical, org-wide normative docs (RFC 2119). Every product cites these.
 | [`PLATFORM-ADOPTION.md`](PLATFORM-ADOPTION.md) | How a product **consumes** the platform (inbound: product → Accounts/Foundry/Data) |
 | [`PRODUCT-SURFACE.md`](PRODUCT-SURFACE.md) | How a product **exposes** itself (outbound: REST, MCP, OAuth2 — caller → product) |
 | [`IN-APP-ADMIN.md`](IN-APP-ADMIN.md) | The in-app admin surface each product owns (tier 3 of 3) |
+| [`DELIVERY-CONTRACT.md`](DELIVERY-CONTRACT.md) | How a product **gets a message to somebody** (Accounts Notify + Foundry Comms conform to one shape) |
 
 ## Layout
 
