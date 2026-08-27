@@ -278,8 +278,10 @@ jobs:
           key: ${{ runner.os }}-plt-v2-${{ hashFiles('**/mix.lock') }}
           restore-keys: ${{ runner.os }}-plt-v2-
       - name: Dialyzer
+        # Report-only repos map dialyxir's exit 2 to a ::warning:: rather than using
+        # continue-on-error (which still stamps a red ##[error] on a green run).
+        # Exit 1/3 (tool could not run) always fails. See the reusable workflow.
         run: mix dialyzer --format github
-        continue-on-error: true          # promote to blocking once PLTs are stable
 
       # gitleaks via the CLI binary. The gitleaks-ACTION requires a PAID license
       # for organization accounts (Cobenian is an org), so it would fail; the
@@ -664,6 +666,20 @@ Copy-pasted workflows drift. The durable fix is **one source of truth**:
 
    Recognized `nonblocking` checks: `credo`, `sobelow`, `hex_audit`, `deps_audit`.
    Dialyzer is governed separately by `dialyzer_blocking` (report-only by default).
+
+   **Report-only does not mean invisible, and it does not mean a red X.** A
+   report-only Dialyzer run surfaces each finding as a `::warning::` annotation and
+   the step ends with one summary `::warning::` — never the runner's
+   `##[error]Process completed with exit code N`. That error annotation is what
+   `continue-on-error` produces, and it makes an advisory report look exactly like a
+   real gate failure in the run summary; a green run wearing a red X teaches everyone
+   to stop reading the annotations panel. (Panel CI #1647, 2026-08-27: green,
+   red X, 237 findings nobody had read.)
+
+   The one thing report-only still **fails** on is Dialyzer not completing — a PLT
+   build failure, a crash, or a stale `.dialyzer_ignore.exs` entry that no longer
+   matches (`list_unused_filters`). "The tool did not run" must never be allowed to
+   read as "the tool found nothing".
 
 3. Update the standard once; every repo inherits it. Pin a tag (`@v1`) and bump
    deliberately.
