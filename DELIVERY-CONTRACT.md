@@ -1,6 +1,6 @@
 # Cobenian Delivery Contract
 
-**Status:** Draft · **Version:** 0.1 · **Last updated:** 2026-08-27
+**Status:** Draft · **Version:** 0.2 · **Last updated:** 2026-08-27
 
 The contract for how a Cobenian product **gets a message to somebody**. Two systems
 implement it — **Accounts Notify** for people inside the account graph, **Foundry
@@ -152,6 +152,77 @@ same invoice.
 
 ---
 
+## 3.5 When somebody replies
+
+People reply. A `place` feed points at a Slack channel; somebody types an answer under it.
+This is not an edge case to be designed away — it is what a two-way surface is for.
+
+### 3.5.1 What happens today
+
+| Channel | What Notify sends as | Where a reply goes |
+|---|---|---|
+| email | `from: {"Cobenian", "notifications@cobenian.com"}`, **no `Reply-To`** | a Cobenian mailbox, outside every product |
+| Slack | `chat.postMessage` with the OAuth token stored on the channel — **Notify's own Slack app**, not Foundry's | nowhere; Notify has no webhook |
+| Teams | Graph, token resolved through the install | nowhere |
+| SMS | Twilio | nowhere |
+
+Three of the four are silent, and silence is the failure mode that costs most: a person
+answers, nothing happens, and there is no signal to anybody that an answer was given. It
+looks exactly like a channel nobody is watching.
+
+Comms, by contrast, was built for this: per-identity Postmark servers each with their own
+inbound stream, and a `+trace` sub-address on the `Reply-To` derived from the identity's
+`From`, so an inbound lands back on the message that produced it.
+
+### 3.5.2 A reply to a *place* is not a reply to a person
+
+A `place` feed delivers one message addressed to nobody in particular. When one member of
+that channel answers, that is not the addressee responding — it is one person in the room
+speaking about something the room was told. Which of the six people in the channel it was
+"for" is not a question with an answer, and an implementation that invents one will be
+wrong.
+
+So the correlation a reply supports is **to the message**, not to a recipient:
+*this human said this, under that notification*.
+
+### 3.5.3 Receive a reply; do not become a conversation
+
+Foundry **Conversations** already models a two-way place properly — threading, verified
+inbound, opaque refs, and `conversations.message.received` carrying `actor` (who spoke),
+`in_reply_to` (which of our messages), and `inbound_message_ref` (how to answer them).
+Notify **MUST NOT** rebuild that.
+
+Nor may Notify delegate to it: Foundry depends on `cobenian_core_accounts`, and Accounts
+depends on no Foundry SDK. Routing Notify's delivery through Conversations would invert
+the stack.
+
+What is left is the useful middle, and it is much smaller than either:
+
+> **A delivery system SHOULD be able to report that a human responded, and MUST NOT
+> pretend one did not.**
+
+Concretely, a **reply receipt** — not a conversation:
+
+- It carries *what was said*, *who said it*, and *which notification it landed under*.
+- It is surfaced to the product as an event. The product decides what a reply means; if it
+  wants a real exchange it starts one through Conversations or Comms, which are built for
+  that.
+- Notify does **not** thread, render cards, accept interactions, or post back. Sending
+  stays one-way.
+
+For email this is a `Reply-To` carrying a trace token plus an inbound endpoint — the shape
+Comms already proves. For Slack and Teams it is an events subscription on the app Notify
+*already owns a token for*, which is a webhook and a signature check, not a chat framework.
+
+### 3.5.4 The minimum, if even that is too much
+
+Where a reply cannot be received, the destination **SHOULD** say so at the point somebody
+would reply — a footer, a thread reply from the bot, anything that distinguishes "this
+channel does not take answers" from "nobody read yours". An unanswerable channel that
+looks answerable is worse than an obviously one-way one.
+
+---
+
 ## 4. Conformance
 
 An implementation conforms when:
@@ -167,7 +238,8 @@ An implementation conforms when:
 
 | System | Clause | State |
 |---|---|---|
-| Accounts Notify | §2 origin / reply path | No acting user recorded; no inbound path. Sound today, a gap once a `place` feed points at a two-way channel. |
+| Accounts Notify | §2 origin / reply path | No acting user recorded; no inbound path on any of its four channels (§3.5.1). |
+| Accounts Notify | §3.5.4 visible one-wayness | A Slack `place` feed looks answerable and is not; a reply is silently lost. |
 | Accounts Notify | §1.1 name-resolves-to-config | Feed keys have no declared owner, so a workspace can claim a platform key by naming it — [cobenian-accounts#379](https://github.com/Cobenian/cobenian-accounts/issues/379). |
 
 ---
