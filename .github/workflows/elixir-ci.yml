@@ -234,9 +234,45 @@ jobs:
           path: priv/plts
           key: ${{ runner.os }}-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-plt-v2-${{ hashFiles('**/mix.lock') }}
           restore-keys: ${{ runner.os }}-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-plt-v2-
+      # Report-only mode must NOT stamp the run with the runner's
+      # "##[error]Process completed with exit code N". `continue-on-error` sets the step
+      # *conclusion* to success but the runner still emits that error annotation, so an
+      # advisory Dialyzer report is indistinguishable from a real gate failure in the run
+      # summary — which trains everyone to ignore the annotations panel. (Observed on
+      # cobenian-panel CI #1647, 2026-08-27: green run, red X, 237 findings nobody read.)
+      #
+      # So handle dialyxir's exit code here instead of delegating to continue-on-error:
+      #   0 -> clean.
+      #   2 -> findings. Already surfaced individually as ::warning:: annotations by
+      #        --format github. Advisory unless dialyzer_blocking.
+      #   * -> Dialyzer could not complete: PLT build failure, a crash, or a stale entry
+      #        in .dialyzer_ignore.exs that no longer matches (exit 1, via
+      #        list_unused_filters). ALWAYS fails, even report-only — "the tool did not
+      #        run" must never be allowed to read as "the tool found nothing".
       - name: Dialyzer
-        run: mix dialyzer --format github
-        continue-on-error: ${{ !inputs.dialyzer_blocking }}
+        env:
+          DIALYZER_BLOCKING: ${{ inputs.dialyzer_blocking }}
+        run: |
+          set +e
+          mix dialyzer --format github
+          rc=$?
+          set -e
+          case "$rc" in
+            0)
+              echo "Dialyzer: no findings."
+              ;;
+            2)
+              if [ "$DIALYZER_BLOCKING" = "true" ]; then
+                echo "::error title=Dialyzer::Dialyzer reported findings and this repo sets dialyzer_blocking: true. See the warning annotations on this run."
+                exit 1
+              fi
+              echo "::warning title=Dialyzer (report-only)::Dialyzer reported findings. NOT failing the build: this repo sets dialyzer_blocking: false. See the warning annotations on this run."
+              ;;
+            *)
+              echo "::error title=Dialyzer::Dialyzer could not complete (exit ${rc}) — a tool/PLT/ignore-filter failure, not a findings report. This fails the build regardless of dialyzer_blocking."
+              exit "$rc"
+              ;;
+          esac
 
       # --- secret scanning (replaces GHAS; runs on all repos) ---
       # gitleaks CLI binary, NOT gitleaks-action@v2 — the action requires a paid
