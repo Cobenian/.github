@@ -1,6 +1,6 @@
 # Cobenian Delivery Contract
 
-**Status:** Draft · **Version:** 0.1 · **Last updated:** 2026-08-27
+**Status:** Draft · **Version:** 0.3 · **Last updated:** 2026-08-28
 
 The contract for how a Cobenian product **gets a message to somebody**. Two systems
 implement it — **Accounts Notify** for people inside the account graph, **Foundry
@@ -119,12 +119,23 @@ one-way**, and somebody will reply in it.
 
 Accordingly:
 
-- A send **SHOULD** record the acting user where one exists, alongside the product and
+- A send **MUST** record the acting user where one exists, alongside the product and
   workspace it already records. Unattended sends legitimately have no user; that is a
   distinct value, not a missing one.
-- A system that delivers to a two-way channel **SHOULD** have a defined answer for an
+- A system that delivers to a two-way channel **MUST** have a defined answer for an
   inbound reply, even if that answer is "dropped, and logged as dropped". Silence is the
   one unacceptable answer, because it looks identical to working.
+
+These were `SHOULD` in 0.2, on the reasoning that no two-way feed existed yet. That is an
+argument for *when* to comply, not for whether — and it is the wrong way round: the clause
+has to be settled **before** the first `place` feed points at a Slack channel, because
+afterwards the question is being asked about live traffic by somebody whose reply already
+vanished. A `SHOULD` here makes losing a human's answer a preference. It is a bug.
+
+Note what the second clause does and does not demand. It does **not** require an inbound
+path. "Dropped, and logged as dropped" conforms. What it forbids is a system that cannot
+say whether a reply ever arrived — which is the state three of Notify's four channels are
+in today.
 
 ---
 
@@ -167,7 +178,8 @@ An implementation conforms when:
 
 | System | Clause | State |
 |---|---|---|
-| Accounts Notify | §2 origin / reply path | No acting user recorded; no inbound path. Sound today, a gap once a `place` feed points at a two-way channel. |
+| Accounts Notify | §2 origin (**MUST**) | No acting user recorded — only `source_product` and the workspace. |
+| Accounts Notify | §2 reply path (**MUST**) | No defined answer for an inbound reply on email, Slack, Teams or SMS; a reply is lost without trace — [cobenian-accounts#382](https://github.com/Cobenian/cobenian-accounts/issues/382). |
 | Accounts Notify | §1.1 name-resolves-to-config | Feed keys have no declared owner, so a workspace can claim a platform key by naming it — [cobenian-accounts#379](https://github.com/Cobenian/cobenian-accounts/issues/379). |
 
 ---
