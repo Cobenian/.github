@@ -157,6 +157,40 @@ jobs:
       # Authenticate to a private Cobenian Hex organization when a key is provided
       # (repos with private Hex deps set the HEX_ORG_KEY secret; others no-op). Must
       # run before deps.get so private packages resolve.
+      #
+      # Hex >= 2.5.0 prints "Authenticating to the cobenian repository with a stored
+      # key is deprecated and will be removed" on every deps.get/hex.audit here. DO NOT
+      # "fix" it by rotating HEX_ORG_KEY or by re-running the command the warning
+      # suggests — the warning's own CI advice IS this line, and following it changes
+      # nothing. Verified against the Hex 2.5.1 source:
+      #
+      #   * Hex.Repo.build_hex_core_config/3 (lib/hex/repo.ex:325) warns whenever
+      #     repo_config.auth_key is non-nil for a `hexpm:<org>` repo. That is the whole
+      #     trigger — the key's type, age and permissions are never inspected.
+      #   * `mix hex.organization auth --key` reaches Mix.Tasks.Hex.auth_organization/2
+      #     (lib/mix/tasks/hex.ex:280), which stores the key as auth_key. So the advised
+      #     command reproduces the exact state that emits the warning.
+      #   * The only alternative, HEX_REPOS_KEY, trips the sibling :env branch
+      #     (repo.ex:378) — a different sentence, equally deprecated.
+      #   * The non-deprecated path is OAuth, but Hex.State's :oauth_token has no env
+      #     var (lib/hex/state.ex:18) — it is written only by `mix hex.user auth`'s
+      #     interactive device flow. There is no CI OAuth path in 2.5.1.
+      #
+      # Upstream owns this and has already fixed it: hexpm/hex#1207 (merged 2026-07-21,
+      # NOT in 2.5.1) records key ownership so organization-owned keys stop warning.
+      # hexpm/hex#1181 is the eventual breaking change, and it deliberately PRESERVES
+      # this command — it only changes what Hex stores (the key is exchanged for a
+      # short-lived token). So this line is already the forward-compatible form and
+      # needs no change; do not pin Hex to hold the warning still, that blocks the fix.
+      #
+      # Two things that DO need care before Hex 2.6 — see the tracking issue:
+      #   1. Per #1207, user-owned keys stop working in 2.6 while organization-owned
+      #      keys keep working. Whether HEX_ORG_KEY survives depends on which it is
+      #      (`mix hex.organization key cobenian list` — org-owned keys appear there).
+      #      A key minted before 2.4.2 via `auth` without --key is likely user-owned.
+      #   2. The 2.6 token is short-lived (~30 min, no refresh), so auth must run
+      #      immediately before the fetch. It does here. Product Dockerfiles that
+      #      consume the fly-deploy.yml hex_org_key build-secret need the same check.
       - name: Authenticate private Hex organization
         env:
           HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
