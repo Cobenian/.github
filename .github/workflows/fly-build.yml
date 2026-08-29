@@ -36,6 +36,14 @@ on:
         required: false
         type: string
         default: "not_run"
+      ledger_bucket:
+        required: false
+        type: string
+        default: "cobenian-fleet-ledger"
+      ledger_endpoint:
+        required: false
+        type: string
+        default: "https://fly.storage.tigris.dev"
     outputs:
       image_ref:
         description: "Immutable, digest-pinned image reference. The artifact id."
@@ -46,6 +54,10 @@ on:
       FLY_API_TOKEN:
         required: true
       HEX_ORG_KEY:
+        required: false
+      LEDGER_ACCESS_KEY_ID:
+        required: false
+      LEDGER_SECRET_ACCESS_KEY:
         required: false
 
 permissions:
@@ -161,6 +173,44 @@ jobs:
           PY
           cat artifact.json
           { echo '### Artifact'; echo '```json'; cat artifact.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+
+      # Append the record to the ledger. Same contract as
+      # cobenian-fleet bundles/cobenian/scripts/ledger, whose ledger-selftest proves the
+      # two properties this depends on: one object per record so concurrent promotions
+      # cannot lose each other, and a read-back so a write that did not land is reported
+      # as a failure rather than a success.
+      #
+      # Skipped, loudly, when no credentials are configured. A build that silently does
+      # not record its artifact is worse than one that refuses: the artifact would exist
+      # and be promotable with nothing in the ledger saying where it came from.
+      - name: Append the artifact record to the ledger
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.LEDGER_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.LEDGER_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_MAX_ATTEMPTS: "3"
+          BUCKET: ${{ inputs.ledger_bucket }}
+          ENDPOINT: ${{ inputs.ledger_endpoint }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then
+            echo "::warning title=Artifact not recorded::No ledger credentials configured, so this artifact exists but is not in the ledger. A promotion that requires a ledger record will refuse it."
+            exit 0
+          fi
+          key="artifacts/${{ github.repository }}/$(echo '${{ steps.push.outputs.digest }}' | tr ':' '-').json"
+
+          if aws s3api --endpoint-url "$ENDPOINT" head-object --bucket "$BUCKET" --key "$key" >/dev/null 2>&1; then
+            echo "Already recorded: $key"
+            exit 0
+          fi
+          aws s3api --endpoint-url "$ENDPOINT" put-object --bucket "$BUCKET" --key "$key" \
+            --body artifact.json --content-type application/json >/dev/null
+
+          # Read back. A put returning 0 is not evidence the object is there.
+          aws s3api --endpoint-url "$ENDPOINT" head-object --bucket "$BUCKET" --key "$key" >/dev/null \
+            || { echo "::error title=Artifact not recorded::Wrote $key but it is not readable back — treating as NOT recorded."; exit 1; }
+          echo "Recorded $key"
 
       - uses: actions/upload-artifact@v4
         with:

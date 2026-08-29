@@ -38,9 +38,26 @@ on:
         required: false
         type: string
         default: ""
+      ledger_bucket:
+        required: false
+        type: string
+        default: "cobenian-fleet-ledger"
+      ledger_endpoint:
+        required: false
+        type: string
+        default: "https://fly.storage.tigris.dev"
+      env_name:
+        description: "Environment this binding is to. One value today; the key exists so a second costs nothing."
+        required: false
+        type: string
+        default: "prod"
     secrets:
       FLY_API_TOKEN:
         required: true
+      LEDGER_ACCESS_KEY_ID:
+        required: false
+      LEDGER_SECRET_ACCESS_KEY:
+        required: false
 
 permissions:
   contents: read
@@ -65,6 +82,39 @@ jobs:
             *@sha256:*) echo "Promoting ${{ inputs.image_ref }}" ;;
             *) echo "::error title=Not an artifact::image_ref must be digest-pinned (…@sha256:…). A tag can be repointed after verification, so promoting one binds something nobody verified."; exit 1 ;;
           esac
+
+
+      # artifact-and-promotion #14: a promotion MUST bind an artifact that already exists
+      # in the ledger. This is the requirement the ledger exists to make enforceable, and
+      # without it "build once, promote" is only a convention.
+      #
+      # Absence of credentials is NOT absence of the artifact. If the ledger cannot be
+      # read, this cannot conclude the artifact is missing, so it warns and proceeds —
+      # treating "could not check" as "not recorded" would block every promotion the
+      # moment the ledger had a bad minute.
+      - name: The artifact must already be in the ledger
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.LEDGER_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.LEDGER_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_MAX_ATTEMPTS: "3"
+          BUCKET: ${{ inputs.ledger_bucket }}
+          ENDPOINT: ${{ inputs.ledger_endpoint }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then
+            echo "::warning title=Ledger not checked::No ledger credentials, so this promotion could not confirm the artifact is recorded. Proceeding — could-not-check is not the same as not-recorded."
+            exit 0
+          fi
+          digest="$(echo '${{ inputs.image_ref }}' | grep -oE 'sha256:[0-9a-f]{64}')"
+          key="artifacts/${{ github.repository }}/$(echo "$digest" | tr ':' '-').json"
+
+          if aws s3api --endpoint-url "$ENDPOINT" head-object --bucket "$BUCKET" --key "$key" >/dev/null 2>&1; then
+            echo "Artifact is in the ledger: $key"
+            exit 0
+          fi
+          echo "::error title=Unrecorded artifact::$key is not in the ledger. Promoting an artifact nothing recorded means nothing can say what it was built from, whether its gate passed, or whether it is reversible."
+          exit 1
 
       - name: Bind the artifact
         env:
@@ -92,6 +142,46 @@ jobs:
           done
           echo "::error title=Promotion unverified::$url never reported $HEAD_SHA (last: ${body:-<none>}). The artifact bound but the running release is serving different code."
           exit 1
+
+
+      # The binding record. Written AFTER verification, so the ledger records what was
+      # observed serving rather than what was attempted — a binding row for a promotion
+      # that never took would be worse than no row.
+      - name: Record the binding
+        if: success()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.LEDGER_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.LEDGER_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_MAX_ATTEMPTS: "3"
+          BUCKET: ${{ inputs.ledger_bucket }}
+          ENDPOINT: ${{ inputs.ledger_endpoint }}
+        run: |
+          set -euo pipefail
+          [ -n "${AWS_ACCESS_KEY_ID:-}" ] || { echo "::warning::Binding not recorded — no ledger credentials."; exit 0; }
+          digest="$(echo '${{ inputs.image_ref }}' | grep -oE 'sha256:[0-9a-f]{64}')"
+          at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          python3 - <<PY > binding.json
+          import json
+          print(json.dumps({
+            "artifact_id": "$digest",
+            "image_ref": "${{ inputs.image_ref }}",
+            "env": "${{ inputs.env_name }}",
+            "app": "${{ inputs.app }}",
+            "source_sha": "${{ inputs.head_sha }}",
+            "bound_at": "$at",
+            "bound_by": "github-actions:${{ github.run_id }}",
+            "intent": "promotion",
+            "result": "verified",
+          }, indent=2))
+          PY
+          key="bindings/${{ inputs.env_name }}/${at//:/-}-$(echo "$digest" | tr ':' '-').json"
+          aws s3api --endpoint-url "$ENDPOINT" put-object --bucket "$BUCKET" --key "$key" \
+            --body binding.json --content-type application/json >/dev/null
+          aws s3api --endpoint-url "$ENDPOINT" head-object --bucket "$BUCKET" --key "$key" >/dev/null \
+            || { echo "::error title=Binding not recorded::Wrote $key but it is not readable back. The app IS serving the artifact; the ledger does not know."; exit 1; }
+          echo "Recorded $key"
+          cat binding.json
 
       # Reports, never gates (observation.md #21): a defect in a readiness check must not
       # make the app undeployable, including by the deploy that would fix it.
