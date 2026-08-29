@@ -1,0 +1,152 @@
+# BUILD adapter. Produces an artifact and records it. Deploys nothing, anywhere.
+#
+# specs/artifact-and-promotion.md §3.1: build and promotion are separate operations with
+# separate adapters (#1); a build MUST NOT name a target environment or be parameterised
+# by one (#2); and a promotion MUST NOT be able to build (#3). Until now `flyctl deploy`
+# did both at once, which meant two builds of the same commit could differ — base image
+# drift, apt versions — so nothing could honestly claim that what was tested is what
+# shipped. That is the gap this closes, and it is the precondition for promotion between
+# environments meaning anything at all.
+#
+# `registry_app` is where the image is STORED, not where it runs. Fly namespaces its
+# registry by app, so an image has to live under some app's name; that is a storage
+# address and not an environment binding. The same artifact is promoted unchanged to any
+# environment by digest.
+name: Fly build (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      head_sha:
+        description: "Full 40-character commit being built."
+        required: true
+        type: string
+      registry_app:
+        description: >-
+          Fly app whose registry namespace stores the image. A storage address, NOT a
+          deployment target — nothing is deployed by this workflow.
+        required: true
+        type: string
+      uses_hex_org_key:
+        required: false
+        type: boolean
+        default: false
+      gate:
+        description: "pass | fail | not_run — the CI result for head_sha, recorded honestly."
+        required: false
+        type: string
+        default: "not_run"
+    outputs:
+      image_ref:
+        description: "Immutable, digest-pinned image reference. The artifact id."
+        value: ${{ jobs.build.outputs.image_ref }}
+      digest:
+        value: ${{ jobs.build.outputs.digest }}
+    secrets:
+      FLY_API_TOKEN:
+        required: true
+      HEX_ORG_KEY:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build artifact
+    runs-on: ubuntu-latest
+    outputs:
+      image_ref: ${{ steps.push.outputs.image_ref }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.head_sha }}
+
+      # #6: a build MUST NOT be recorded for a short or null source sha. An artifact whose
+      # source is unknown is not promotable, and that is a different fact from no artifact.
+      - name: Source sha must be full length
+        run: |
+          set -euo pipefail
+          case "${{ inputs.head_sha }}" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) echo "::error::head_sha must be a full 40-character sha (got '${{ inputs.head_sha }}')"; exit 1 ;;
+          esac
+
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1.6
+
+      - name: Build and push, deploying nothing
+        id: push
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
+          SHA: ${{ inputs.head_sha }}
+        run: |
+          set -uo pipefail
+          args="--build-only --push --remote-only -a ${{ inputs.registry_app }}"
+          args="$args --image-label sha-${SHA:0:12} --build-arg GIT_SHA=$SHA"
+          if [ "${{ inputs.uses_hex_org_key }}" = "true" ]; then
+            args="$args --build-secret hex_org_key=$HEX_ORG_KEY"
+          fi
+
+          flyctl deploy $args 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::build failed"; exit "$rc"; }
+
+          # THE DIGEST IS NOT IN flyctl's SUMMARY. Its closing line prints only the tag —
+          #   image: registry.fly.io/app:sha-0f980929051a
+          # while the digest appears solely in BuildKit's push output:
+          #   pushing manifest for registry.fly.io/app:sha-...@sha256:35a0f97c...
+          # Parsing the obvious line would record a TAG as the artifact id, which
+          # artifact-and-promotion #5 forbids: a tag is mutable and can be repointed, so an
+          # artifact identified by one is not an artifact. Verified against a real build
+          # before this was written.
+          digest="$(grep -oE '@sha256:[0-9a-f]{64}' build.log | tr -d '@' | sort -u | head -1)"
+
+          if [ -z "$digest" ]; then
+            echo "::error title=No digest::The push produced no manifest digest. Recording a tag as the artifact id is forbidden (artifact-and-promotion #5), so this build is not recorded."
+            exit 1
+          fi
+          if [ "$(grep -oE '@sha256:[0-9a-f]{64}' build.log | sort -u | wc -l)" -ne 1 ]; then
+            echo "::error title=Ambiguous digest::More than one manifest digest in the push output; refusing to guess which is the artifact."
+            exit 1
+          fi
+
+          ref="registry.fly.io/${{ inputs.registry_app }}@${digest}"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "image_ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Artifact $ref"
+
+      # §3.2. `reversible` is recorded as unknown, which #12 requires be treated as
+      # `narrow` everywhere — the conservative reading. Classifying each migration is the
+      # next increment; claiming reversibility we have not computed would be worse than
+      # admitting we have not computed it.
+      - name: Record the artifact
+        env:
+          SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          mig="$(git ls-tree -r --name-only HEAD | grep -E 'priv/repo/migrations/.*\.exs$' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
+          python3 - <<PY > artifact.json
+          import json, os
+          print(json.dumps({
+            "artifact_id": "${{ steps.push.outputs.digest }}",
+            "image_ref": "${{ steps.push.outputs.image_ref }}",
+            "source_repo": "${{ github.repository }}",
+            "source_sha": os.environ["SHA"],
+            "built_at": "${{ github.event.repository.updated_at }}",
+            "builder": "github-actions:${{ github.run_id }}",
+            "gate": "${{ inputs.gate }}",
+            "migrations": json.loads('''$mig'''),
+            "reversible": "unknown",
+            "scan": "not_run",
+          }, indent=2))
+          PY
+          cat artifact.json
+          { echo '### Artifact'; echo '```json'; cat artifact.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifact-record-${{ inputs.head_sha }}
+          path: artifact.json
+          retention-days: 90
