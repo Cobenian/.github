@@ -331,6 +331,37 @@ without the `requires:` entry credo silently ignores it and the guard is inert.
 
 ---
 
+### 3.5 A rule belongs in the module that can enforce it
+
+**A rule stated in a module that cannot enforce it is a comment, and comments do not get
+adopted.** State a rule beside the function that implements it. Where a rule must be
+referenced elsewhere, the other place carries a pointer, not a second copy of the
+statement.
+
+This is not a style preference. It is the mechanism behind a real fleet-wide defect, and
+the shape is worth recognising because it looks like good documentation right up until it
+fails:
+
+`Cobenian.CorePlatform.Readiness` — the shared readiness kit — correctly stated that a
+liveness probe must never depend on another service, because a probe a platform *acts* on
+must only report faults that remediation can fix. The module then shipped `self_checks`,
+`dependencies`, `render/2` and `report/1`: all readiness, no liveness. The rule was
+correct, written down, in a shared library, and in the one module structurally incapable of
+satisfying it.
+
+Six products adopted that module. The rule reached none of them. Four went on to answer
+`503` from `/health` on any database error, so a single Postgres incident would have failed
+every machine's health check at once, removed them all from rotation, and taken `/version`
+down with them — the endpoint every deploy and conformance result is interpreted through. A
+fifth satisfied the rule only by checking nothing at all.
+
+Not five independent mistakes. One missing abstraction, beside a correct rule nobody could
+follow.
+
+The test to apply: **if a reader adopts this module, can they act on this sentence?** If
+not, the sentence is in the wrong file — and the usual fix is that the module should have
+grown a function rather than a paragraph.
+
 ## 4. CD — `.github/workflows/fly-deploy.yml` (applications only)
 
 Deploy is **gated on a successful CI run**, not on the merge alone. It triggers on
