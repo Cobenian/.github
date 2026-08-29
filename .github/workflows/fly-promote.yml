@@ -46,6 +46,11 @@ on:
         required: false
         type: string
         default: "https://fly.storage.tigris.dev"
+      ledger_prefix:
+        description: "Key prefix. The bucket will hold other things; the ledger stays under one namespace."
+        required: false
+        type: string
+        default: "ledger/"
       env_name:
         description: "Environment this binding is to. One value today; the key exists so a second costs nothing."
         required: false
@@ -100,6 +105,7 @@ jobs:
           AWS_MAX_ATTEMPTS: "3"
           BUCKET: ${{ inputs.ledger_bucket }}
           ENDPOINT: ${{ inputs.ledger_endpoint }}
+          PREFIX: ${{ inputs.ledger_prefix }}
         run: |
           set -euo pipefail
           if [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then
@@ -107,7 +113,7 @@ jobs:
             exit 0
           fi
           digest="$(echo '${{ inputs.image_ref }}' | grep -oE 'sha256:[0-9a-f]{64}')"
-          key="artifacts/${{ github.repository }}/$(echo "$digest" | tr ':' '-').json"
+          key="${PREFIX}artifacts/${{ github.repository }}/$(echo "$digest" | tr ':' '-').json"
 
           if aws s3api --endpoint-url "$ENDPOINT" head-object --bucket "$BUCKET" --key "$key" >/dev/null 2>&1; then
             echo "Artifact is in the ledger: $key"
@@ -156,6 +162,7 @@ jobs:
           AWS_MAX_ATTEMPTS: "3"
           BUCKET: ${{ inputs.ledger_bucket }}
           ENDPOINT: ${{ inputs.ledger_endpoint }}
+          PREFIX: ${{ inputs.ledger_prefix }}
         run: |
           set -euo pipefail
           [ -n "${AWS_ACCESS_KEY_ID:-}" ] || { echo "::warning::Binding not recorded — no ledger credentials."; exit 0; }
@@ -175,7 +182,7 @@ jobs:
             "result": "verified",
           }, indent=2))
           PY
-          key="bindings/${{ inputs.env_name }}/${at//:/-}-$(echo "$digest" | tr ':' '-').json"
+          key="${PREFIX}bindings/${{ inputs.env_name }}/${at//:/-}-$(echo "$digest" | tr ':' '-').json"
           aws s3api --endpoint-url "$ENDPOINT" put-object --bucket "$BUCKET" --key "$key" \
             --body binding.json --content-type application/json >/dev/null
           aws s3api --endpoint-url "$ENDPOINT" head-object --bucket "$BUCKET" --key "$key" >/dev/null \
