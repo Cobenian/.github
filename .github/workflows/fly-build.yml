@@ -101,16 +101,25 @@ jobs:
           # artifact-and-promotion #5 forbids: a tag is mutable and can be repointed, so an
           # artifact identified by one is not an artifact. Verified against a real build
           # before this was written.
-          digest="$(grep -oE '@sha256:[0-9a-f]{64}' build.log | tr -d '@' | sort -u | head -1)"
+          # ONLY the `pushing manifest for` line. A build log carries other digests that
+          # are not this artifact — base images pulled by `FROM ... @sha256:` among them.
+          # The first version of this grepped every `@sha256:` in the log, found three on a
+          # real CI build, and correctly REFUSED rather than picking one; two were base
+          # image layers. Refusing was right and the extraction was wrong.
+          manifests="$(grep -E 'pushing manifest for ' build.log \
+                       | grep -oE '@sha256:[0-9a-f]{64}' | tr -d '@' | sort -u)"
+          count="$(printf '%s\n' "$manifests" | grep -c . || true)"
 
-          if [ -z "$digest" ]; then
+          if [ "$count" -eq 0 ]; then
             echo "::error title=No digest::The push produced no manifest digest. Recording a tag as the artifact id is forbidden (artifact-and-promotion #5), so this build is not recorded."
             exit 1
           fi
-          if [ "$(grep -oE '@sha256:[0-9a-f]{64}' build.log | sort -u | wc -l)" -ne 1 ]; then
-            echo "::error title=Ambiguous digest::More than one manifest digest in the push output; refusing to guess which is the artifact."
+          if [ "$count" -ne 1 ]; then
+            echo "::error title=Ambiguous digest::$count manifests were pushed; refusing to guess which is the artifact."
+            printf '  %s\n' $manifests
             exit 1
           fi
+          digest="$manifests"
 
           ref="registry.fly.io/${{ inputs.registry_app }}@${digest}"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
