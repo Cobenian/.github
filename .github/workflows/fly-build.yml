@@ -44,6 +44,11 @@ on:
         required: false
         type: string
         default: "https://fly.storage.tigris.dev"
+      ledger_prefix:
+        description: "Key prefix. The bucket will hold other things; the ledger stays under one namespace."
+        required: false
+        type: string
+        default: "ledger/"
     outputs:
       image_ref:
         description: "Immutable, digest-pinned image reference. The artifact id."
@@ -192,13 +197,14 @@ jobs:
           AWS_MAX_ATTEMPTS: "3"
           BUCKET: ${{ inputs.ledger_bucket }}
           ENDPOINT: ${{ inputs.ledger_endpoint }}
+          PREFIX: ${{ inputs.ledger_prefix }}
         run: |
           set -euo pipefail
           if [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then
             echo "::warning title=Artifact not recorded::No ledger credentials configured, so this artifact exists but is not in the ledger. A promotion that requires a ledger record will refuse it."
             exit 0
           fi
-          key="artifacts/${{ github.repository }}/$(echo '${{ steps.push.outputs.digest }}' | tr ':' '-').json"
+          key="${PREFIX}artifacts/${{ github.repository }}/$(echo '${{ steps.push.outputs.digest }}' | tr ':' '-').json"
 
           if aws s3api --endpoint-url "$ENDPOINT" head-object --bucket "$BUCKET" --key "$key" >/dev/null 2>&1; then
             echo "Already recorded: $key"
