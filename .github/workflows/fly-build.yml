@@ -135,7 +135,15 @@ jobs:
           SHA: ${{ inputs.head_sha }}
         run: |
           set -euo pipefail
-          mig="$(git ls-tree -r --name-only HEAD | grep -E 'priv/repo/migrations/.*\.exs$' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
+          # When the build happened. github.event.repository.updated_at is when the
+          # REPOSITORY last changed, which is a different fact and drifts from this one by
+          # however long the queue and build took — five minutes on the first real run.
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export BUILT_AT
+          # Migration FILES only. `.formatter.exs` lives in that directory and is not a
+          # migration; the first version listed it, which would put a non-migration into a
+          # record whose whole purpose is deciding whether a promotion is reversible.
+          mig="$(git ls-tree -r --name-only HEAD | grep -E 'priv/repo/migrations/[0-9]{14}_.*\.exs$' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
           python3 - <<PY > artifact.json
           import json, os
           print(json.dumps({
@@ -143,7 +151,7 @@ jobs:
             "image_ref": "${{ steps.push.outputs.image_ref }}",
             "source_repo": "${{ github.repository }}",
             "source_sha": os.environ["SHA"],
-            "built_at": "${{ github.event.repository.updated_at }}",
+            "built_at": os.environ["BUILT_AT"],
             "builder": "github-actions:${{ github.run_id }}",
             "gate": "${{ inputs.gate }}",
             "migrations": json.loads('''$mig'''),
