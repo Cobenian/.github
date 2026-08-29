@@ -24,7 +24,9 @@ on:
         type: string
         default: "/health"
       ready_path:
-        description: "Optional readiness path to curl (e.g. /readyz); skipped when empty."
+        description: >-
+          Optional readiness path (e.g. /readyz). Probed AFTER binding and REPORTED, never
+          gated — see the "Report readiness after binding" step. Skipped when empty.
         required: false
         type: string
         default: ""
@@ -135,10 +137,9 @@ jobs:
         if: steps.freshness.outputs.fresh == 'true'
         run: |
           sleep 15
+          # Liveness only. Readiness deliberately does NOT gate — it is probed and reported
+          # after verification instead (specs/observation.md #21).
           curl -fsS "https://${{ inputs.app_domain }}${{ inputs.health_path }}" > /dev/null
-          if [ -n "${{ inputs.ready_path }}" ]; then
-            curl -fsS "https://${{ inputs.app_domain }}${{ inputs.ready_path }}" > /dev/null
-          fi
 
       # ── Prove the intended code is actually serving ──────────────────────────
       #
@@ -170,3 +171,82 @@ jobs:
           $url never reported $HEAD_SHA (last response: ${body:-<none>}). The deploy reported \
           success but the running release is serving different code — do not trust this deploy."
           exit 1
+
+      # ── Post-binding readiness report (never a gate) ──────────────────────────
+      #
+      # `specs/observation.md` #21 forbids gating a deploy on /readyz, and is right for a
+      # reason worth restating where someone may be tempted to "improve" this: if readiness
+      # gates deploys, a defect in a readiness check makes the app undeployable — INCLUDING
+      # the deploy that would fix that defect. A gate must not be able to lock out its own
+      # repair. Until now `ready_path` was curled with `-fsS` inside the smoke test, so it
+      # did gate; cobenian_companion_umbrella passes it, and once its /readyz began checking
+      # vaults and migrations a single unkeyed vault would have blocked every deploy.
+      #
+      # It runs at all because `specs/change-and-recovery.md` #16 requires the window
+      # immediately after a binding to be checked then, not at the next scheduled tick —
+      # otherwise the hourly external probe leaves up to an hour in which a deploy that
+      # stalled a queue looks entirely successful.
+      #
+      # Only the app's own checks can appear here: /readyz already refuses to let a failing
+      # dependency move its status code.
+      - name: Report readiness after binding
+        if: steps.freshness.outputs.fresh == 'true' && inputs.ready_path != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          url="https://${{ inputs.app_domain }}${{ inputs.ready_path }}"
+
+          # Machines roll one at a time, so a 503 mid-roll is expected. Poll for a settled
+          # answer rather than judging the first one.
+          code="000"
+          for _ in $(seq 1 12); do
+            code=$(curl -s -o body.json -w '%{http_code}' --max-time 10 "$url" || echo "000")
+            [ "$code" = "200" ] && break
+            sleep 10
+          done
+
+          if [ "$code" = "200" ]; then
+            echo "Readiness after binding: ready ($url)."
+            exit 0
+          fi
+
+          # A body without `checks` is not a readiness report (observation.md #16) — a
+          # catch-all 200 or an error page must never read as healthy.
+          failing=$(python3 -c "
+          import json
+          try:
+              c = (json.load(open('body.json')) or {}).get('checks') or {}
+              bad = sorted(k.replace(':status','') for k, v in c.items()
+                           if (v[0] if isinstance(v, list) and v else {}).get('status') == 'fail')
+              print(', '.join(bad) or 'no failing check named')
+          except Exception:
+              print('no readiness report returned')
+          " 2>/dev/null || echo unreadable)
+
+          echo "::warning title=Not ready after deploy::$url returned $code after binding (failing: $failing). The intended code IS serving; the app reports it cannot do its job. Readiness does not gate deploys, so nothing was blocked — act on this directly."
+
+          TITLE="🚨 Not ready after deploy: $REPO"
+          # Best effort: a caller that has not granted `issues: write` still gets the
+          # annotation above, and the hourly external probe still catches it.
+          NUM=$(gh issue list --state open --search "$TITLE" --json number,title \
+                  --jq "map(select(.title == \"$TITLE\")) | .[0].number // empty" 2>/dev/null || true)
+          printf '%s\n' \
+            "Readiness returned \`$code\` after deploying \`$HEAD_SHA\`." \
+            "" \
+            "Failing checks: \`$failing\`" \
+            "" \
+            "The deploy verified — the intended code is serving. The app is reporting that it" \
+            "cannot do its job. Readiness deliberately does not gate deploys, so nothing was" \
+            "blocked and nothing was rolled back." \
+            "" \
+            "$RUN_URL" > issue.md
+          if [ -n "${NUM:-}" ]; then
+            gh issue comment "$NUM" --body-file issue.md 2>/dev/null || true
+          else
+            gh issue create --title "$TITLE" --body-file issue.md 2>/dev/null || true
+          fi
