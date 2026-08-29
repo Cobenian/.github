@@ -1,0 +1,111 @@
+# PROMOTION adapter. Binds an artifact that already exists to one environment.
+#
+# specs/artifact-and-promotion.md #3: a promotion MUST NOT produce an artifact — "if a
+# promotion adapter can compile, fetch dependencies, or resolve a version range, it is a
+# build". This one takes a digest-pinned image and calls `flyctl deploy --image`, which has
+# no build path. It never checks out the source, so it structurally cannot build: the
+# repository is not present in the job.
+#
+# That is the difference from the old fly-deploy.yml, which built and deployed in one step.
+# Two builds of the same commit can differ — base image drift, apt versions — so nothing
+# could honestly claim that what was verified is what shipped. Promotion by digest can.
+name: Fly promote (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      image_ref:
+        description: "Digest-pinned image from the build adapter. MUST contain @sha256:."
+        required: true
+        type: string
+      app:
+        description: "Fly app to bind the artifact to. THIS names the environment."
+        required: true
+        type: string
+      app_domain:
+        required: true
+        type: string
+      head_sha:
+        description: "Source sha the artifact was built from, asserted against /version."
+        required: true
+        type: string
+      version_path:
+        required: false
+        type: string
+        default: "/version"
+      ready_path:
+        description: "Probed after binding and REPORTED. Never gates (observation.md #21)."
+        required: false
+        type: string
+        default: ""
+    secrets:
+      FLY_API_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: Promote to ${{ inputs.app }}
+    runs-on: ubuntu-latest
+    concurrency: promote-${{ inputs.app }}
+    steps:
+      # No checkout. A promotion that cannot see the source cannot build from it, which is
+      # #3 enforced by construction rather than by discipline.
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1.6
+
+      # #14: a promotion MUST bind an artifact that already exists. A tag is not an
+      # artifact — it is mutable and can be repointed between verification and promotion,
+      # which is exactly the substitution this whole separation exists to prevent.
+      - name: Refuse anything that is not digest-pinned
+        run: |
+          set -euo pipefail
+          case "${{ inputs.image_ref }}" in
+            *@sha256:*) echo "Promoting ${{ inputs.image_ref }}" ;;
+            *) echo "::error title=Not an artifact::image_ref must be digest-pinned (…@sha256:…). A tag can be repointed after verification, so promoting one binds something nobody verified."; exit 1 ;;
+          esac
+
+      - name: Bind the artifact
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -uo pipefail
+          args="--image ${{ inputs.image_ref }} -a ${{ inputs.app }} --wait-timeout 15m"
+          flyctl deploy $args || {
+            echo "::warning::First promotion attempt failed; retrying once."
+            flyctl deploy $args
+          }
+
+      # A green promotion is not evidence the artifact is serving — the same reason
+      # fly-deploy.yml asserts this. Only the app reporting its own commit closes the gap.
+      - name: Verify the bound artifact is serving
+        env:
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -uo pipefail
+          url="https://${{ inputs.app_domain }}${{ inputs.version_path }}"
+          for _ in $(seq 1 20); do
+            body=$(curl -fsS "$url" 2>/dev/null || true)
+            case "$body" in *"$HEAD_SHA"*) echo "Verified: $url reports $HEAD_SHA."; exit 0 ;; esac
+            sleep 15
+          done
+          echo "::error title=Promotion unverified::$url never reported $HEAD_SHA (last: ${body:-<none>}). The artifact bound but the running release is serving different code."
+          exit 1
+
+      # Reports, never gates (observation.md #21): a defect in a readiness check must not
+      # make the app undeployable, including by the deploy that would fix it.
+      - name: Report readiness after binding
+        if: inputs.ready_path != ''
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          url="https://${{ inputs.app_domain }}${{ inputs.ready_path }}"
+          code="000"
+          for _ in $(seq 1 12); do
+            code=$(curl -s -o body.json -w '%{http_code}' --max-time 10 "$url" || echo "000")
+            [ "$code" = "200" ] && break
+            sleep 10
+          done
+          if [ "$code" = "200" ]; then echo "Ready after binding."; exit 0; fi
+          echo "::warning title=Not ready after promotion::$url returned $code. The artifact IS serving; the app reports it cannot do its job. Readiness does not gate, so nothing was blocked."
