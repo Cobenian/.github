@@ -51,6 +51,15 @@ on:
         required: false
         type: string
         default: "ledger/"
+      require_tip:
+        description: >-
+          Refuse to promote a source sha that is no longer the tip of the default branch.
+          TRUE for automatic CD. FALSE for a deliberate promotion of an older artifact —
+          a rollback, or promoting a verified artifact onward — which is the whole point
+          of having a ledger and must not be blocked.
+        required: false
+        type: boolean
+        default: false
       env_name:
         description: "Environment this binding is to. One value today; the key exists so a second costs nothing."
         required: false
@@ -89,6 +98,45 @@ jobs:
           esac
 
 
+      # ── Freshness gate (the stale-deploy fix), for automatic CD only ─────────
+      #
+      # CI runs take minutes. When two merges land close together the OLDER commit's CI
+      # can finish AFTER the newer merge, shipping older code over newer with a green
+      # check. Observed 2026-08-02 in cobenian-panel: #184 merged at 14:44, #183's CI
+      # finished at 14:45:28 and deployed its own older sha, and the run list labelled it
+      # with the NEWER sha so nothing surfaced it.
+      #
+      # It lives HERE rather than in the build because separating the two changed where
+      # the risk is. Building a superseded commit is harmless — it produces an artifact
+      # nobody promotes. Promoting one is the bug. And it is conditional, because after
+      # the separation "promote an artifact that is not the tip" is a legitimate act:
+      # that is what a rollback is, and what promoting a verified artifact onward to
+      # another environment is. Only automatic CD sets require_tip.
+      #
+      # Skipping is always safe: whatever is now the tip has, or will have, its own run.
+      - name: Check the source is still the tip of the default branch
+        id: freshness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.require_tip }}" != "true" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+            echo "Deliberate promotion — tip check not requested."
+            exit 0
+          fi
+          branch=$(gh api "repos/$REPO" --jq .default_branch)
+          tip=$(gh api "repos/$REPO/commits/$branch" --jq .sha)
+          if [ "$tip" = "$HEAD_SHA" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+            echo "Promoting $HEAD_SHA (tip of $branch)."
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Promotion skipped (superseded)::$HEAD_SHA is no longer the tip of $branch (now $tip). Skipping so older code is not shipped over newer; the tip promotes from its own run."
+          fi
+
       # artifact-and-promotion #14: a promotion MUST bind an artifact that already exists
       # in the ledger. This is the requirement the ledger exists to make enforceable, and
       # without it "build once, promote" is only a convention.
@@ -98,6 +146,7 @@ jobs:
       # treating "could not check" as "not recorded" would block every promotion the
       # moment the ledger had a bad minute.
       - name: The artifact must already be in the ledger
+        if: steps.freshness.outputs.fresh == 'true'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.LEDGER_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.LEDGER_SECRET_ACCESS_KEY }}
@@ -123,6 +172,7 @@ jobs:
           exit 1
 
       - name: Bind the artifact
+        if: steps.freshness.outputs.fresh == 'true'
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
@@ -136,6 +186,7 @@ jobs:
       # A green promotion is not evidence the artifact is serving — the same reason
       # fly-deploy.yml asserts this. Only the app reporting its own commit closes the gap.
       - name: Verify the bound artifact is serving
+        if: steps.freshness.outputs.fresh == 'true'
         env:
           HEAD_SHA: ${{ inputs.head_sha }}
         run: |
@@ -154,7 +205,7 @@ jobs:
       # observed serving rather than what was attempted — a binding row for a promotion
       # that never took would be worse than no row.
       - name: Record the binding
-        if: success()
+        if: success() && steps.freshness.outputs.fresh == 'true' 
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.LEDGER_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.LEDGER_SECRET_ACCESS_KEY }}
@@ -193,7 +244,7 @@ jobs:
       # Reports, never gates (observation.md #21): a defect in a readiness check must not
       # make the app undeployable, including by the deploy that would fix it.
       - name: Report readiness after binding
-        if: inputs.ready_path != ''
+        if: inputs.ready_path != '' && steps.freshness.outputs.fresh == 'true' 
         continue-on-error: true
         run: |
           set -uo pipefail
