@@ -160,7 +160,12 @@ jobs:
           # Migration FILES only. `.formatter.exs` lives in that directory and is not a
           # migration; the first version listed it, which would put a non-migration into a
           # record whose whole purpose is deciding whether a promotion is reversible.
-          mig="$(git ls-tree -r --name-only HEAD | grep -E 'priv/repo/migrations/[0-9]{14}_.*\.exs$' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
+          # `grep` exits 1 when it matches nothing, and under `set -o pipefail` that failed
+          # the whole step. An app with NO migrations is not an error: a service with no
+          # Ecto repo legitimately has none, and the first one to try it could not be built
+          # at all. `|| true` keeps a genuine grep failure from being masked while letting
+          # "no matches" mean an empty list, which is what it means.
+          mig="$(git ls-tree -r --name-only HEAD | { grep -E 'priv/repo/migrations/[0-9]{14}_.*\.exs$' || true; } | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
           python3 - <<PY > artifact.json
           import json, os
           print(json.dumps({
