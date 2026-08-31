@@ -39,12 +39,25 @@ jobs:
           otp-version: ${{ inputs.otp-version }}
 
       # Private Cobenian Hex org (no-op when the secret is unset), before deps.get.
-      - name: Authenticate private Hex organization
+      - name: Authenticate private Hex organizations
         env:
           HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
+          HEX_FLEET_KEY: ${{ secrets.HEX_FLEET_KEY }}
         run: |
           if [ -n "$HEX_ORG_KEY" ]; then
             mix hex.organization auth cobenian --key "$HEX_ORG_KEY"
+          fi
+          # A SECOND ORGANISATION, WITH ITS OWN KEY. `fleet` holds libraries shared
+          # across fleets that do not trust each other -- fleet_auth first. A Hex
+          # organisation key grants read to EVERY package in its organisation and cannot
+          # be scoped to one, so reusing HEX_ORG_KEY here would hand every repo holding
+          # it a key for the other organisation, which is exactly what the separate
+          # organisation was created to prevent. Hence a distinct secret name.
+          #
+          # Keyed on presence, like the line above, so this is a no-op for the ~40 repos
+          # that will never touch `fleet`. A repo opts in by having the secret.
+          if [ -n "$HEX_FLEET_KEY" ]; then
+            mix hex.organization auth fleet --key "$HEX_FLEET_KEY"
           fi
 
       # hex.audit needs deps resolved (it reads the resolved tree, not just the lock).
