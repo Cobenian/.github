@@ -4,7 +4,10 @@
 # promotion adapter can compile, fetch dependencies, or resolve a version range, it is a
 # build". This one takes a digest-pinned image and calls `flyctl deploy --image`, which has
 # no build path. It never checks out the source, so it structurally cannot build: the
-# repository is not present in the job.
+# repository is not present in the job. (It does sparse-checkout the single deploy-time
+# config file — see "Fetch the deploy-time config" — which is a declarative TOML and not a
+# build path; without it flyctl silently deploys Fly's server-side config instead of the
+# repo's.)
 #
 # That is the difference from the old fly-deploy.yml, which built and deployed in one step.
 # Two builds of the same commit can differ — base image drift, apt versions — so nothing
@@ -51,6 +54,15 @@ on:
         required: false
         type: string
         default: "ledger/"
+      config_path:
+        description: >-
+          The app's deploy-time config, read from the source at `head_sha` and passed to
+          `flyctl deploy -c`. Without it flyctl silently uses Fly's SERVER-SIDE copy of the
+          app config instead, so nothing in the repo's fly.toml ever reaches the platform.
+          Set to "" to keep that older behaviour deliberately.
+        required: false
+        type: string
+        default: "fly.toml"
       require_tip:
         description: >-
           Refuse to promote a source sha that is no longer the tip of the default branch.
@@ -171,6 +183,32 @@ jobs:
           echo "::error title=Unrecorded artifact::$key is not in the ledger. Promoting an artifact nothing recorded means nothing can say what it was built from, whether its gate passed, or whether it is reversible."
           exit 1
 
+      # ── The deploy-time config ────────────────────────────────────────────────
+      #
+      # `flyctl deploy --image` with no config file does NOT skip configuration. It fetches the
+      # app config from the Fly API and updates every machine to match it, so Fly's server-side
+      # copy wins and the repo's fly.toml is never applied — not its `[[vm]]`, not its health
+      # checks, not its `[env]`. Editing fly.toml shipped nothing, and nothing said so. Every app
+      # calling this workflow has that latent; cobenian-panel hit it on 2026-09-01, where a memory
+      # bump to fit headless Chrome was reverted by each deploy and client invoices went out with
+      # no PDF because Chrome was OOM-killed.
+      #
+      # **#3 still holds.** The invariant is that a promotion cannot BUILD, enforced by the source
+      # not being present. A sparse checkout of one declarative TOML keeps that: there is no
+      # mix.exs, no lockfile, no source tree — nothing to compile, no dependencies to fetch, no
+      # version range to resolve. A config file is not a build path.
+      #
+      # Checked out at `head_sha`, not the branch tip: the config that ships must be the one that
+      # belongs to the artifact being bound.
+      - name: Fetch the deploy-time config
+        if: steps.freshness.outputs.fresh == 'true' && inputs.config_path != ''
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.head_sha }}
+          sparse-checkout: ${{ inputs.config_path }}
+          sparse-checkout-cone-mode: false
+          path: __deploy_config
+
       - name: Bind the artifact
         if: steps.freshness.outputs.fresh == 'true'
         env:
@@ -178,6 +216,18 @@ jobs:
         run: |
           set -uo pipefail
           args="--image ${{ inputs.image_ref }} -a ${{ inputs.app }} --wait-timeout 15m"
+
+          # Absent config is not an error — an app may legitimately keep its config on the
+          # platform — but it is said out loud, because the failure it produces otherwise is a
+          # fly.toml edit that appears to deploy and changes nothing.
+          config="__deploy_config/${{ inputs.config_path }}"
+          if [ -n "${{ inputs.config_path }}" ] && [ -f "$config" ]; then
+            echo "Applying $config from ${{ inputs.head_sha }}"
+            args="$args -c $config"
+          else
+            echo "::warning title=No deploy-time config::Deploying from Fly's stored app config. Anything in the repo's ${{ inputs.config_path }} will NOT be applied."
+          fi
+
           flyctl deploy $args || {
             echo "::warning::First promotion attempt failed; retrying once."
             flyctl deploy $args
