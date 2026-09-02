@@ -72,6 +72,26 @@ on:
         required: false
         type: boolean
         default: false
+      declared_app:
+        description: >-
+          The name this application has in the FLEET MANIFEST, which is not always the Fly
+          app name. `app` above is the platform's name and is what the promote command
+          needs; this is what the fleet calls the same thing, and the two differ today for
+          cobenian_companion_umbrella, whose Fly app is cobenian-companion.
+
+          Supplied so the binding can carry a subject a reader can join against the
+          declaration WITHOUT resolving an alias. This workflow is the only participant
+          holding both names at once, so resolving it anywhere else is guesswork.
+
+          OPTIONAL, AND OMITTED RATHER THAN GUESSED WHEN ABSENT. It would be correct today
+          to derive it from the repository name — measured against the manifest, `name`
+          equals `repo` for all eight deployable apps — but that is a convention nobody
+          enforces, and a derived value that is right today and silently wrong later is the
+          failure this fleet keeps removing. A binding with no `subject` honestly says this
+          writer did not state one.
+        required: false
+        type: string
+        default: ""
       env_name:
         description: "Environment this binding is to. One value today; the key exists so a second costs nothing."
         required: false
@@ -283,6 +303,28 @@ jobs:
             "result": "verified",
           }, indent=2))
           PY
+          # THE DECLARED SUBJECT, ADDED ONLY WHEN THE CALLER SUPPLIED ONE.
+          #
+          # `app` above is the Fly app name. A reader joining bindings to the fleet's
+          # declaration on that name gets it wrong for any app whose platform name differs
+          # -- it finds no declaration, and a careless reader turns "no declaration" into
+          # "an app nobody declared" or "an app that never deployed". Both are wrong and in
+          # opposite directions, from one omission.
+          #
+          # `subject` is the `run-record` §3 #4 form, `<type>:<name>[@<env>]`, so it carries
+          # the environment axis rather than needing one bolted on later.
+          #
+          # Absent input means NO KEY, never an empty string and never a guess. A binding
+          # that cannot say which declared subject it belongs to must not appear to say.
+          if [ -n "${{ inputs.declared_app }}" ]; then
+            python3 - <<'PY' > binding.json.new
+          import json
+          d = json.load(open("binding.json"))
+          d["subject"] = "app:${{ inputs.declared_app }}@${{ inputs.env_name }}"
+          print(json.dumps(d, indent=2))
+          PY
+            mv binding.json.new binding.json
+          fi
           key="${PREFIX}bindings/${{ inputs.env_name }}/${at//:/-}-$(echo "$digest" | tr ':' '-').json"
           aws s3api --endpoint-url "$ENDPOINT" put-object --bucket "$BUCKET" --key "$key" \
             --body binding.json --content-type application/json >/dev/null
