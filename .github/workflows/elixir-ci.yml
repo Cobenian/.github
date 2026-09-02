@@ -206,8 +206,25 @@ jobs:
           # it a key for the other organisation, which is exactly what the separate
           # organisation was created to prevent. Hence a distinct secret name.
           #
-          # Keyed on presence, like the line above, so this is a no-op for the ~40 repos
-          # that will never touch `fleet`. A repo opts in by having the secret.
+          # KEYED ON PRESENCE, and presence is not opt-in. An earlier draft of this
+          # comment said "a repo opts in by having the secret". That was false by the
+          # time it was written: both organisation secrets are `visibility=private`,
+          # which grants them to EVERY private repository in the organisation. So this
+          # runs in all ~40 repos, not the handful that use `fleet`.
+          #
+          # Recorded rather than quietly corrected, because a comment describing a model
+          # nobody implemented is the exact thing this estate keeps paying to remove --
+          # the next person reads the intent and trusts a scoping that does not exist.
+          #
+          # Harmless as it stands: authenticating an organisation a repo never fetches
+          # from costs one command. If real opt-in is ever wanted, it is a change to the
+          # SECRET's visibility (selected repositories), not to this file.
+          #
+          # And note the failure shape of keying on presence: a repo that SHOULD have the
+          # key and does not skips this silently and fails later at `mix deps.get`, with
+          # an error naming a package rather than a credential. Left deliberately -- CI
+          # goes red either way, so it is loud -- but it is a wrong-diagnosis-shaped error
+          # and worth knowing before someone debugs the package.
           if [ -n "$HEX_FLEET_KEY" ]; then
             mix hex.organization auth fleet --key "$HEX_FLEET_KEY"
           fi
