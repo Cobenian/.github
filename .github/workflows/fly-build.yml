@@ -60,6 +60,8 @@ on:
         required: true
       HEX_ORG_KEY:
         required: false
+      HEX_FLEET_KEY:
+        required: false
       LEDGER_ACCESS_KEY_ID:
         required: false
       LEDGER_SECRET_ACCESS_KEY:
@@ -97,6 +99,7 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
+          HEX_FLEET_KEY: ${{ secrets.HEX_FLEET_KEY }}
           SHA: ${{ inputs.head_sha }}
         run: |
           set -uo pipefail
@@ -104,6 +107,28 @@ jobs:
           args="$args --image-label sha-${SHA:0:12} --build-arg GIT_SHA=$SHA"
           if [ "${{ inputs.uses_hex_org_key }}" = "true" ]; then
             args="$args --build-secret hex_org_key=$HEX_ORG_KEY"
+          fi
+          # KEYED ON PRESENCE, deliberately unlike the line above, and the asymmetry is
+          # the point rather than an oversight.
+          #
+          # The Dockerfile's `--mount=type=secret,id=hex_fleet_key` IS the declaration
+          # that a build needs this key. A `uses_hex_fleet_key` input would state the same
+          # fact a second time, in a second file, free to drift from the first -- and a
+          # fact stated twice is how `fly_app` and `tracks = "continuous"` both went wrong
+          # this week. One declaration, in the file that consumes it.
+          #
+          # Passing a build-secret the Dockerfile does not mount is inert: BuildKit ignores
+          # it. So presence-keying is self-limiting, and it needs no caller change, which
+          # closes the hazard below one step sooner than an input would.
+          #
+          # WHAT IT FIXES. cobenian-assay's Dockerfile mounts BOTH hex_org_key and
+          # hex_fleet_key; this workflow passed only the first. The unmounted-but-declared
+          # secret resolves to an EMPTY FILE rather than an error, so the build takes its
+          # "no key in this build" branch and strips the `fleet` organisation out of the
+          # lock -- successfully, greenly, and silently. Harmless only while nothing
+          # depends on a `fleet` package, and wrong the moment something does.
+          if [ -n "${HEX_FLEET_KEY:-}" ]; then
+            args="$args --build-secret hex_fleet_key=$HEX_FLEET_KEY"
           fi
 
           flyctl deploy $args 2>&1 | tee build.log
