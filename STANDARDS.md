@@ -187,13 +187,36 @@ checkout
 → mix compile --warnings-as-errors   # blocking
 → mix credo --strict                 # blocking
 → mix sobelow --exit                 # blocking — APPS ONLY
-→ mix hex.audit                      # blocking — retired packages
-→ mix deps.audit                     # blocking — Hex CVEs (mix_audit)
 → mix ecto.create && mix ecto.migrate  # if the repo has a Repo
 → mix test                           # blocking
 → mix dialyzer (cached PLTs)         # NON-blocking initially, then promote
 → gitleaks                           # blocking — secret scanning (all repos)
+→ mix hex.audit                      # blocking — retired packages    (LAST, see below)
+→ mix deps.audit                     # blocking — Hex CVEs (mix_audit)(LAST, see below)
 ```
+
+**Why the two audits are last, against "cheapest first" (#53, 2026-09-04).** Every other
+step fails because of *this commit's code*, so halting is the right answer and
+cheapest-first is right. The dependency audits are different: they fail because somebody
+published an advisory, which says nothing about whether this commit works — and a blocking
+step that fails skips every step after it.
+
+`cobenian-steward` paid for it. A mint advisory failed `hex.audit`, which skipped
+`deps.audit`, the test database, `test`, `Dialyzer` and `gitleaks`. Its `main` went hours
+with no tests and no secret scan, looking like "a dependency needs bumping" rather than
+"nothing was verified" — and when the bump landed the build went green and the gap
+disappeared with it, recorded nowhere.
+
+They stay **blocking**; only position changed. `nonblocking` was never the fix — every
+consumer passes `nonblocking: ""` deliberately, and an audit that cannot fail a build is
+not a gate. Proven by forcing `hex.audit` to fail on a temporary branch: under the old
+order `test`/`Dialyzer`/`gitleaks` were `skipped`; under this one they are `success`, and
+the job still concludes `failure`.
+
+> **Known gap, not fixed by #53.** `credo` and `sobelow` carry the same guard and still
+> precede `gitleaks`, so a style violation still skips the secret scan. Whether a
+> credential was committed does not depend on whether the file is formatted. Needs its own
+> change; #53's evidence covers only the dependency audits.
 
 > **Local convenience.** A `precommit` mix alias may mirror this gate but
 > **auto-fixes** (`format`, `deps.unlock --unused`) for developers. **CI must use
