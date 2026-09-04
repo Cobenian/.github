@@ -276,14 +276,6 @@ jobs:
         run: mix sobelow --exit --skip --root ${{ inputs.sobelow_root }}
         continue-on-error: ${{ contains(inputs.nonblocking, 'sobelow') }}
 
-      - name: hex.audit (retired packages)
-        run: mix hex.audit
-        continue-on-error: ${{ contains(inputs.nonblocking, 'hex_audit') }}
-
-      - name: deps.audit (Hex CVEs)
-        run: mix deps.audit
-        continue-on-error: ${{ contains(inputs.nonblocking, 'deps_audit') }}
-
       # --- DB + tests ---
       - name: Set up test database
         if: ${{ inputs.postgres }}
@@ -377,6 +369,34 @@ jobs:
           fi
           [ -x ./gitleaks ] || { echo "::error::Could not fetch gitleaks v${v} after 3 attempts (transient download failure — not a secret finding)"; exit 1; }
           ./gitleaks detect --source . --redact --no-banner --exit-code 1
+
+      # --- dependency advisories: LAST, deliberately ---
+      # These ran here-ward of `test` until 2026-09-04, and the position was the bug.
+      # A blocking step that fails skips every step after it, so a newly-published
+      # advisory against an untouched dependency skipped deps.audit, the test database,
+      # test, Dialyzer and gitleaks. Steward's main sat green-adjacent for hours that way:
+      # red for something that reads as "bump a dependency", while nothing recorded that
+      # its tests and secret scan had not run. The bump then made it green and the gap
+      # vanished with it.
+      #
+      # NOT fixed by `nonblocking`. Every consumer passes `nonblocking: ""` deliberately
+      # -- the comments there say "greenfield -> fully strict" -- so they asked for
+      # blocking advisory gates and should keep them. The defect is position, not
+      # strictness, and it would still bite for whatever a repo left blocking. So these
+      # stay blocking and move last: an advisory failure can no longer skip a
+      # verification gate, and both still gate.
+      #
+      # WHY THESE TWO AND NOT credo/sobelow: those fail on THIS commit's code, so
+      # stopping the build is the correct response to them. hex.audit and deps.audit fail
+      # on facts about the outside world -- someone published an advisory -- which says
+      # nothing about whether this commit's code works, and must not stop us finding out.
+      - name: hex.audit (retired packages)
+        run: mix hex.audit
+        continue-on-error: ${{ contains(inputs.nonblocking, 'hex_audit') }}
+
+      - name: deps.audit (Hex CVEs)
+        run: mix deps.audit
+        continue-on-error: ${{ contains(inputs.nonblocking, 'deps_audit') }}
 
       # --- CI-computed security/freshness posture → workflow-run artifact (issue #106 Option A) ---
       # Re-runs the scanners in machine-readable mode, folds their results into ONE JSON
