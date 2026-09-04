@@ -339,13 +339,30 @@ jobs:
       # times we hit the GitHub release CDN, the fewer chances a transient 5xx blip
       # (as happened 2026-07-24) can touch the build. Both this blocking step and the
       # non-blocking scan-posture step below reuse the same ./gitleaks.
+      # --- secret scan: RUNS EVEN IF AN EARLIER GATE FAILED ---
+      # Whether this commit leaks a credential is not contingent on whether it compiles,
+      # passes credo, or types cleanly. Before this, `credo --strict` failing skipped the
+      # secret scan outright -- "we did not look for secrets because the formatting was
+      # wrong" -- and every consumer passes `nonblocking: ""`, so that guard was live in
+      # all of them. #53 stopped the dependency audits from skipping this step; these two
+      # `if:`s stop EVERYTHING ELSE from skipping it.
+      #
+      # `success() || failure()` rather than `always()`: always() also runs on a CANCELLED
+      # job, where the runner is being torn down and a scan result is meaningless.
+      #
+      # This step needs only the checkout and its own binary -- no Elixir, no deps, no
+      # compiled code -- so there is no earlier failure that makes running it incoherent.
+      # It STILL FAILS THE BUILD on a finding: `--exit-code 1` is untouched. Not skippable
+      # is not the same as not blocking.
       - name: Cache gitleaks binary
+        if: ${{ success() || failure() }}
         uses: actions/cache@v6
         with:
           path: ./gitleaks
           key: gitleaks-${{ runner.os }}-${{ inputs.gitleaks_version }}
 
       - name: gitleaks (secret scan)
+        if: ${{ success() || failure() }}
         run: |
           v="${{ inputs.gitleaks_version }}"
           # Fetch the binary resiliently: a transient release-CDN 5xx (e.g. a 504) must
@@ -390,6 +407,11 @@ jobs:
       # stopping the build is the correct response to them. hex.audit and deps.audit fail
       # on facts about the outside world -- someone published an advisory -- which says
       # nothing about whether this commit's code works, and must not stop us finding out.
+      #
+      # That principle covers `test` and `Dialyzer`, and it does NOT cover the secret
+      # scan: credo failing is not a reason to stop asking whether a credential was
+      # committed. gitleaks is therefore exempt from ALL of this ordering, by its own
+      # `if:` above, rather than by being placed late.
       - name: hex.audit (retired packages)
         run: mix hex.audit
         continue-on-error: ${{ contains(inputs.nonblocking, 'hex_audit') }}
