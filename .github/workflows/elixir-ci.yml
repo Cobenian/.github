@@ -595,24 +595,61 @@ jobs:
           fi
 
           # --- hex.outdated: list of {package,current,latest} ---
-          # Text/table output only. exit 0 = all current (honest []); exit 1 = some
-          # outdated → best-effort table parse; else null (omit).
+          # PARSED BY HEADER OFFSET, NOT BY FIELD POSITION. `mix hex.outdated` prints a
+          # fixed-width TABLE whose columns are not whitespace-delimited fields:
+          #
+          #   Dependency               Only      Current  Latest  Status
+          #   oban                               2.24.0   2.24.1  Update possible
+          #   dialyxir                 dev,test  1.4.7    1.4.8   Update possible
+          #
+          # `Only` is blank on most rows and `Status` is two words, so the Nth field means
+          # different things on different rows. The previous awk read `$2` as the current
+          # version, so every row with `Only` populated -- every dev-only dependency -- was
+          # dropped. Zero rows parsed became `hex_outdated: []`, "everything current",
+          # published to a security monitor by every repository on this workflow while they
+          # held outdated dependencies. Issue #57.
+          #
+          # THE EXIT CODE IS NO LONGER CONSULTED. It was overloaded three ways: 0 for "all
+          # current" AND for "could not run at all", 1 for "some outdated" AND for a Mix
+          # error. The table decides instead. A recognised header means a table was produced
+          # and its contents are the answer; no header means unparseable, which is `null` and
+          # never `[]`. That matters most here, because `hex.outdated` writes its auth
+          # warnings to STDOUT -- so this text is rarely empty even with no table in it.
           HEX_OUTDATED='null'
-          if [ "$DEPS_OK" != "true" ]; then
-            : # no dependency tree — this scanner cannot have looked. Stays null.
-          elif mix hex.outdated > .scan/outdated.txt 2>/dev/null; then
-            HEX_OUTDATED='[]'
-          elif [ $? -eq 1 ]; then
+          if [ "$DEPS_OK" = "true" ]; then
+            mix hex.outdated > .scan/outdated.txt 2>/dev/null || true
             HEX_OUTDATED="$(awk '
-              NR>1 && $1 ~ /^[A-Za-z0-9_]+$/ && $2 ~ /^[0-9]+\.[0-9]/ && $3 ~ /^[0-9]+\.[0-9]/ && $2 != $3 {
-                printf "{\"package\":\"%s\",\"current\":\"%s\",\"latest\":\"%s\"}\n", $1, $2, $3
-              }' .scan/outdated.txt | jq -sc . 2>/dev/null || echo null)"
-            # AN EMPTY PARSE OF NON-EMPTY OUTPUT IS A FAILED PARSE. `jq -sc .` prints `[]`
-            # for empty input and never null, so a table this awk could not read becomes
-            # "ran, found nothing" -- the exact shape being fixed here. The tool exited 1,
-            # which means it HAD something to report, so parsing zero rows out of it is this
-            # script's failure to read, not the tool's finding of nothing.
-            if [ "$HEX_OUTDATED" = "[]" ] && [ -s .scan/outdated.txt ]; then
+              # Locate the header and take each column'"'"'s START COLUMN from it. A column
+              # added, removed or renamed then shifts an offset rather than silently
+              # changing what a field means.
+              !seen && /Dependency/ && /Current/ && /Latest/ && /Status/ {
+                seen = 1
+                cDep = index($0, "Dependency"); cOnly = index($0, "Only")
+                cCur = index($0, "Current");    cLat  = index($0, "Latest")
+                cSta = index($0, "Status")
+                next
+              }
+              seen {
+                # Slice to the NEXT column start, so a blank cell stays blank rather than
+                # letting the following column slide into its place.
+                dep = substr($0, cDep, (cOnly ? cOnly : cCur) - cDep)
+                cur = substr($0, cCur, cLat - cCur)
+                lat = substr($0, cLat, cSta - cLat)
+                sta = substr($0, cSta)
+                gsub(/^[ \t]+|[ \t]+$/, "", dep); gsub(/^[ \t]+|[ \t]+$/, "", cur)
+                gsub(/^[ \t]+|[ \t]+$/, "", lat); gsub(/^[ \t]+|[ \t]+$/, "", sta)
+                if (dep !~ /^[A-Za-z0-9_]+$/) next
+                if (cur !~ /^[0-9]+\.[0-9]/ || lat !~ /^[0-9]+\.[0-9]/) next
+                # THE STATUS COLUMN DECIDES. Inferring from cur != lat re-implements hex'"'"'s
+                # own judgement about what a requirement admits, which is the same class of
+                # mistake as reading the table positionally.
+                if (tolower(sta) ~ /^up-to-date/) next
+                printf "{\"package\":\"%s\",\"current\":\"%s\",\"latest\":\"%s\"}\n", dep, cur, lat
+              }
+              END { if (!seen) exit 3 }
+            ' .scan/outdated.txt | jq -sc . 2>/dev/null)"
+            # awk exits 3 when it never saw a header: unparseable, not empty.
+            if [ "${PIPESTATUS[0]:-0}" = "3" ] || [ -z "$HEX_OUTDATED" ]; then
               HEX_OUTDATED='null'
             fi
           fi
