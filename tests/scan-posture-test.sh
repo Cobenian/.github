@@ -63,10 +63,15 @@ case "$1" in
       broken)  echo "** (Mix) Unknown package fleet_auth in lockfile"; exit 1 ;;
     esac ;;
   hex.outdated)
+    # THE REAL TABLE SHAPE, captured from `mix hex.outdated`. Fixed-width columns, `Only`
+    # blank on most rows and populated on dev-only dependencies, `Status` two words. A
+    # fixture with tidy single-space columns cannot reproduce the bug this guards.
     case "$MIXCASE" in
-      clean)   exit 0 ;;
-      found)   echo "Dependency  Current  Latest"
-               echo "phoenix     1.8.12   1.8.13   Update possible"; exit 1 ;;
+      clean)   printf 'Dependency               Only      Current  Latest  Status\n'
+               printf 'bandit                             1.12.5   1.12.5  Up-to-date\n'; exit 0 ;;
+      found)   printf 'Dependency               Only      Current  Latest  Status\n'
+               printf 'oban                               2.24.0   2.24.1  Update possible\n'
+               printf 'dialyxir                 dev,test  1.4.7    1.4.8   Update possible\n'; exit 1 ;;
       broken)  echo "** (Mix) Unknown package fleet_auth in lockfile"; exit 1 ;;
     esac ;;
 esac
@@ -96,8 +101,19 @@ echo "and a scanner that DID look still reports what it found:"
 # destroying the ability to report a clean repository at all.
 t "ran, found nothing — honest empty" '[]|[]'              "$(posture clean true)"
 t "ran, found something — reported"   \
-  '[{"package":"poison","version":"3.1.0","reason":"use jason)"}]|[{"package":"phoenix","current":"1.8.12","latest":"1.8.13"}]' \
+  '[{"package":"poison","version":"3.1.0","reason":"use jason)"}]|[{"package":"oban","current":"2.24.0","latest":"2.24.1"},{"package":"dialyxir","current":"1.4.7","latest":"1.4.8"}]' \
   "$(posture found true)"
+
+echo "and a table column being blank does not shift the columns after it:"
+# THE BUG THIS EXISTS FOR (issue #57). `Only` is blank for `oban` and `dev,test` for
+# `dialyxir`, so whitespace-split fields mean different things on the two rows. The previous
+# parser read `$2` as the current version and dropped EVERY dev-only dependency -- then
+# published the empty result as `[]`, "everything current", to a security monitor.
+#
+# Asserted as its own case rather than only inside the row above, so that a regression says
+# "the dev-only row vanished" instead of "the list changed".
+t "a dev-only dependency is not dropped" "yes" \
+  "$(posture found true | grep -q dialyxir && echo yes || echo no)"
 
 [ "$fails" -eq 0 ] && echo "scan-posture-test: all passed" || echo "scan-posture-test: $fails failed"
 exit $((fails > 0))
