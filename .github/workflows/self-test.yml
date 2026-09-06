@@ -1,0 +1,45 @@
+# This repository's own tests.
+#
+# It had none. Every workflow here is REUSABLE and consumed by fourteen repositories, so a
+# defect lands everywhere at once the moment the `v1` tag is retargeted — and until now the
+# only thing exercising these files was the fleet running them in production.
+#
+# What prompted it: the scan-posture step published a clean security posture for a run in
+# which nothing was scanned, and no test existed that could have noticed.
+name: Self-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  tests:
+    name: Self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: install pyyaml
+        run: python3 -m pip install --quiet pyyaml
+
+      # The tests extract the step's script out of the workflow YAML and run it against a
+      # stubbed `mix`, so they exercise the real shell rather than a copy of it that can
+      # drift. A test asserting on a copy proves the copy is correct.
+      - name: a scan posture never reports clean from a scanner that could not look
+        run: bash tests/scan-posture-test.sh
+
+      # Every workflow must at least parse. A syntax error here is fourteen repositories'
+      # CI failing at once.
+      - name: every workflow parses
+        run: |
+          set -euo pipefail
+          n=0
+          for f in .github/workflows/*.yml; do
+            python3 -c "import sys,yaml; yaml.safe_load(open(sys.argv[1]))" "$f"
+            n=$((n+1))
+          done
+          # A zero match is a FAILURE, not a pass: if these move out from under the glob
+          # this step must go red rather than quietly stop covering anything.
+          [ "$n" -gt 0 ] || { echo "no workflows matched — this check has gone blind"; exit 1; }
+          echo "$n workflow(s) parse"
