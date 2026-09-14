@@ -105,6 +105,23 @@ jobs:
           set -uo pipefail
           args="--build-only --push --remote-only -a ${{ inputs.registry_app }}"
           args="$args --image-label sha-${SHA:0:12} --build-arg GIT_SHA=$SHA"
+          # THE COMMIT CI TESTED, AS AN IMAGE LABEL. The fleet reads it per machine as
+          # `image_ref.labels.fleet_commit` from `flyctl machines list -j`, which is how a
+          # service with no public endpoint (cobenian-assay-runner) is observed at all --
+          # Cobenian/cobenian-fleet#204.
+          #
+          # A LABEL, not machine metadata: a label is part of the image, so it travels with
+          # the artifact through promotion and rollback and cannot disagree with what runs.
+          # Metadata belongs to the machine and is carried forward across image updates,
+          # so after a rollback it still names the commit that was rolled away from.
+          #
+          # NOT flyctl's own GH_SHA label: that is read from the environment, which here is
+          # the default-branch tip when this job STARTED -- not `head_sha`, the commit that
+          # was tested. Under workflow_run those differ whenever main moved during CI.
+          #
+          # Here and not on the promotion's `--image` deploy: flyctl applies labels only
+          # when it builds.
+          args="$args --label fleet_commit=$SHA"
           if [ "${{ inputs.uses_hex_org_key }}" = "true" ]; then
             args="$args --build-secret hex_org_key=$HEX_ORG_KEY"
           fi
