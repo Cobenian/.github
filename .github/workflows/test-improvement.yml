@@ -1,0 +1,388 @@
+# REUSABLE weekly unit test improvement (workflow_call) — every Cobenian app, Elixir or Python.
+#
+#   uses: Cobenian/.github/.github/workflows/test-improvement.yml@v1
+#   (thin caller: templates/test-improvement.yml)
+#
+# Monday's mutation sample (mutation.yml) breaks one operator at a time on the files a repository
+# lists in .github/mutation/paths.txt and reports which breaks no test noticed. This job, the next
+# day and with the same seed (so the same breaks), asks a model to add or strengthen tests so they
+# notice them, then decides from the record, never from the model's account, whether the change may
+# be proposed (tools/test-improvement-verify):
+#
+#   * only files under the tests directories changed;
+#   * no test, test file, assertion or requirement name (PANEL-TB-010, §4.1) removed;
+#   * the full suite passes (and is formatted, where the language has a formatter);
+#   * every break caught before is still caught, and at least one missed break is caught now.
+#
+# When all hold it opens ONE pull request for a person to review. It never merges anything, never
+# touches production code, and keeps at most one such pull request open per repository. When they
+# do not, it says why in the run summary and on the mutation-sample issue, and opens nothing.
+#
+# NOTHING IS NOT A PASS. No paths file, an empty one, or no ANTHROPIC_API_KEY secret FAILS the run
+# with "not configured" in the summary, so a job that has never drafted a test cannot sit green
+# (Panel's first run found the key missing and nothing said so but a line in a log). Waiting on an
+# open improvement pull request is a deliberate choice, and succeeds with a summary saying so.
+#
+# THE TOOLS ARE NOT COPIED INTO REPOSITORIES: both are checked out from this repository at the
+# commit this workflow was called at (job.workflow_sha).
+#
+# CREDENTIALS. The repository is checked out without a persisted token, and the model's step gets
+# only ANTHROPIC_API_KEY: the write token is handed to git in the Propose step alone, after the
+# verifier has passed.
+#
+# CI DOES NOT START on a pull request opened with GITHUB_TOKEN (GitHub's rule against workflow
+# loops). The pull request body says so; a person closes and reopens it to run CI before review.
+name: Unit test improvement (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: "elixir | python (required)"
+        type: string
+        required: true
+      paths_file:
+        type: string
+        default: ".github/mutation/paths.txt"
+      tests_dir:
+        description: "space-separated globs where tests live; default `test` (elixir), `apps/*/test` (umbrella) or `tests` (python). The only paths the model may change."
+        type: string
+        default: ""
+      test_command:
+        description: "the full suite. Default `mix test` (elixir) or every tests/*.py as a standalone script (python)"
+        type: string
+        default: ""
+      mutant_command:
+        description: "runs the chosen test files; `{test}` runs once per file. Default `mix test` (elixir) or `python3 {test}` (python)"
+        type: string
+        default: ""
+      format_command:
+        description: "formatting check. Default `mix format --check-formatted` (elixir), none (python)"
+        type: string
+        default: ""
+      setup_command:
+        description: "installs and compiles. Default `mix deps.get && mix compile` (elixir) or `pip install -r requirements.txt` when present (python)"
+        type: string
+        default: ""
+      postgres:
+        type: boolean
+        default: false
+      postgres_image:
+        type: string
+        default: "postgres:17"
+      umbrella:
+        description: "an Elixir umbrella: tests default to apps/*/test and the model is told so"
+        type: boolean
+        default: false
+      model:
+        description: "default: the TEST_IMPROVEMENT_MODEL variable, else claude-sonnet-5"
+        type: string
+        default: ""
+      max_turns:
+        type: number
+        default: 80
+      sample:
+        type: number
+        default: 25
+      elixir-version:
+        type: string
+        default: "1.20.3"
+      otp-version:
+        type: string
+        default: "29.0.5"
+      python-version:
+        type: string
+        default: "3.13"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  improve:
+    name: Unit test improvement
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    concurrency:
+      group: test-improvement-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      MIX_ENV: test
+      # A .pyc written beside production code is an untracked change outside the tests, which the
+      # verifier refuses; and a mutated module must never be served from a stale bytecode cache.
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Configured?
+        id: configured
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          LANGUAGE: ${{ inputs.language }}
+          UMBRELLA: ${{ inputs.umbrella }}
+          PATHS_FILE: ${{ inputs.paths_file }}
+          TESTS_DIR: ${{ inputs.tests_dir }}
+          TEST_COMMAND: ${{ inputs.test_command }}
+          MUTANT_COMMAND: ${{ inputs.mutant_command }}
+          FORMAT_COMMAND: ${{ inputs.format_command }}
+          SETUP_COMMAND: ${{ inputs.setup_command }}
+          SAMPLE: ${{ inputs.sample }}
+        run: |
+          set -euo pipefail
+          set -f  # tests_dir holds globs for the tools, not for this shell
+          not_configured() {
+            echo "::error title=Unit test improvement not configured::$1"
+            { echo "### Unit test improvement: not configured"; echo; echo "$1"; echo; echo "Nothing was drafted. This run fails so that a job which has done nothing never reads as a pass."; } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          case "$LANGUAGE" in
+            elixir)
+              if [ "$UMBRELLA" = true ]; then dirs_default="apps/*/test"; else dirs_default="test"; fi
+              test_default="mix test"; mutant_default="mix test"; format_default="mix format --check-formatted"
+              setup_default="mix deps.get && mix compile"
+              tools_default="Read,Write,Edit,Glob,Grep,Bash(mix test:*),Bash(mix format:*)" ;;
+            python)
+              dirs_default="tests"
+              test_default='shopt -s nullglob; t=(tests/*.py); [ ${#t[@]} -gt 0 ] || { echo "no tests/*.py"; exit 1; }; for f in "${t[@]}"; do echo "== $f"; python3 "$f"; done'
+              mutant_default="python3 {test}"; format_default=""
+              setup_default="if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi"
+              tools_default="Read,Write,Edit,Glob,Grep,Bash(python3:*)" ;;
+            *) not_configured "language must be elixir or python, not '$LANGUAGE'." ;;
+          esac
+          [ -f "$PATHS_FILE" ] || not_configured "$PATHS_FILE does not exist. List the files to mutate there, one per line, with a comment saying why each matters."
+          grep -vE '^[[:space:]]*(#|$)' "$PATHS_FILE" > "$RUNNER_TEMP/paths" || true
+          [ -s "$RUNNER_TEMP/paths" ] || not_configured "$PATHS_FILE lists no files."
+          [ -n "$ANTHROPIC_API_KEY" ] || not_configured "The ANTHROPIC_API_KEY secret is not visible to this repository. Add it (an organization secret shared with this repository works) and pass \`secrets: inherit\` from the caller."
+
+          dirs="${TESTS_DIR:-$dirs_default}"
+          : > "$RUNNER_TEMP/sample-args"; : > "$RUNNER_TEMP/verify-args"
+          while IFS= read -r p; do printf -- '--path\n%s\n' "$p" >> "$RUNNER_TEMP/sample-args"; done < "$RUNNER_TEMP/paths"
+          for t in $dirs; do
+            printf -- '--tests-dir\n%s\n' "$t" >> "$RUNNER_TEMP/sample-args"
+            printf -- '--tests-dir\n%s\n' "$t" >> "$RUNNER_TEMP/verify-args"
+          done
+          printf -- '--command\n%s\n--sample\n%s\n' "${MUTANT_COMMAND:-$mutant_default}" "$SAMPLE" >> "$RUNNER_TEMP/sample-args"
+          {
+            echo "SEED=$(date -u +%G%V)"
+            echo "TESTS_DIRS=$dirs"
+            echo "RUN_TESTS=${TEST_COMMAND:-$test_default}"
+            echo "RUN_FORMAT=${FORMAT_COMMAND:-$format_default}"
+            echo "RUN_SETUP=${SETUP_COMMAND:-$setup_default}"
+            echo "ALLOWED_TOOLS=$tools_default"
+          } >> "$GITHUB_ENV"
+
+          open=$(gh pr list --label test-improvement --state open --json number --jq 'length')
+          if [ "$open" != "0" ]; then
+            echo "::notice::A unit test improvement pull request is already open; this week waits for it."
+            { echo "### Unit test improvement: waiting"; echo; echo "A \`test-improvement\` pull request is already open. Nothing new is drafted until a person merges or closes it."; } >> "$GITHUB_STEP_SUMMARY"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tool ref
+        if: steps.configured.outputs.go == 'true'
+        env:
+          TOOLS_REPO: ${{ job.workflow_repository }}
+          TOOLS_SHA: ${{ job.workflow_sha }}
+        run: |
+          [ -n "$TOOLS_REPO" ] && [ -n "$TOOLS_SHA" ] || { echo "::error::job.workflow_sha is unavailable, so the tools' version cannot be pinned to this workflow's."; exit 1; }
+          echo "tools: $TOOLS_REPO@$TOOLS_SHA"
+      - uses: actions/checkout@v7
+        if: steps.configured.outputs.go == 'true'
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .fleet-tools
+          persist-credentials: false
+      # Out of the working tree: the verifier counts every untracked file as a change, and the
+      # model has no business reading the gate it is judged by.
+      - if: steps.configured.outputs.go == 'true'
+        run: mv .fleet-tools/tools "$RUNNER_TEMP/fleet-tools" && rm -rf .fleet-tools
+
+      - name: Start Postgres
+        if: steps.configured.outputs.go == 'true' && inputs.postgres
+        env:
+          IMAGE: ${{ inputs.postgres_image }}
+        run: |
+          docker run -d --name db -p 5432:5432 -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=postgres --health-cmd "pg_isready -U postgres" --health-interval 2s "$IMAGE"
+          for _ in $(seq 90); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' db)" = healthy ] && exit 0
+            sleep 2
+          done
+          docker logs db; echo "::error::Postgres did not become healthy"; exit 1
+      - uses: erlef/setup-beam@v1
+        if: steps.configured.outputs.go == 'true' && inputs.language == 'elixir'
+        with:
+          elixir-version: ${{ inputs.elixir-version }}
+          otp-version: ${{ inputs.otp-version }}
+      - uses: actions/setup-python@v7
+        if: steps.configured.outputs.go == 'true'
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Cache deps and _build
+        if: steps.configured.outputs.go == 'true' && inputs.language == 'elixir'
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mutation-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mutation-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-mix-
+            ${{ runner.os }}-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-mix-
+      - name: Authenticate private Hex organizations
+        if: steps.configured.outputs.go == 'true' && inputs.language == 'elixir'
+        env:
+          HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
+          HEX_FLEET_KEY: ${{ secrets.HEX_FLEET_KEY }}
+        run: |
+          if [ -n "$HEX_ORG_KEY" ]; then mix hex.organization auth cobenian --key "$HEX_ORG_KEY"; fi
+          if [ -n "$HEX_FLEET_KEY" ]; then mix hex.organization auth fleet --key "$HEX_FLEET_KEY"; fi
+      - name: Set up
+        if: steps.configured.outputs.go == 'true'
+        run: bash -euo pipefail -c "$RUN_SETUP"
+
+      - name: Sample before
+        id: before
+        if: steps.configured.outputs.go == 'true'
+        run: |
+          set +e
+          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          mapfile -t args < "$RUNNER_TEMP/sample-args"
+          python3 "$RUNNER_TEMP/fleet-tools/mutation-sample" --repo . "${args[@]}" \
+            --seed "$SEED" --timeout 900 --out "$RUNNER_TEMP/before.json"
+          [ $? = 2 ] && exit 1
+          missed=$(python3 -c "import json,sys; r=json.load(open(sys.argv[1])); print(sum(1 for m in r['mutants'] if m['outcome'] in ('survived','untested')))" "$RUNNER_TEMP/before.json")
+          echo "missed=$missed" >> "$GITHUB_OUTPUT"
+
+      - name: Draft stronger tests
+        if: steps.configured.outputs.go == 'true' && steps.before.outputs.missed != '0'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL: ${{ inputs.model || vars.TEST_IMPROVEMENT_MODEL || 'claude-sonnet-5' }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          LANGUAGE: ${{ inputs.language }}
+        run: |
+          npm install -g @anthropic-ai/claude-code >/dev/null
+          python3 - "$RUNNER_TEMP/before.json" > "$RUNNER_TEMP/prompt.md" <<'PY'
+          import json, os, sys
+          r = json.load(open(sys.argv[1]))
+          lang = os.environ["LANGUAGE"]
+          dirs = os.environ["TESTS_DIRS"].split()
+          where = " or ".join(d.rstrip("/") + "/" for d in dirs)
+          missed = [m for m in r["mutants"] if m["outcome"] in ("survived", "untested")]
+          print(f"You are strengthening this {'Elixir' if lang == 'elixir' else 'Python'} project's unit tests. Each line below is a")
+          print("deliberate bug: one operator in production code swapped for its opposite. The tests did not notice it.\n")
+          for m in missed:
+              tests = ", ".join(m.get("tests") or []) or "no test file names this code"
+              print(f"- {m['file']}:{m['line']}  `{m['from']}` -> `{m['to']}` in `{m['code']}` ({m['outcome']}; tests: {tests})")
+          if lang == "elixir":
+              run = "Run `mix test <file>` on each test file you change until it passes (in an umbrella, `mix test apps/<app>/test/<file>` from the root works), and `mix format` at the end."
+              keep = "an assert or refute"
+          else:
+              run = "Run `python3 <test file>` on each test file you change until it exits 0. Follow the style of the file you are in: `def test_` functions, or standalone scripts that call check(...) and exit non-zero on failure."
+              keep = "an assert or check(...)"
+          print(f"""
+          Add or strengthen tests under {where} so each of these bugs would make a test fail. Rules:
+          - Change files under {where} only. Never change production code, configuration or anything else.
+          - Never delete or rename a test, remove {keep}, or loosen an assertion.
+          - Keep every requirement identifier (like PANEL-TB-010) and citation (like §4.1) already in a test.
+          - Test behaviour a person or caller relies on, at the boundary the code exposes, not private details.
+          - {run}
+          - If a bug cannot be caught without changing production code, leave it and say which and why.
+          """)
+          PY
+          claude -p "$(cat "$RUNNER_TEMP/prompt.md")" \
+            --model "$MODEL" --max-turns "$MAX_TURNS" \
+            --allowedTools "$ALLOWED_TOOLS" \
+            > "$RUNNER_TEMP/claude.txt" 2>&1 || true
+          tail -40 "$RUNNER_TEMP/claude.txt"
+
+      - name: Full suite and formatting
+        id: suite
+        if: steps.configured.outputs.go == 'true' && steps.before.outputs.missed != '0'
+        run: |
+          set +e
+          ok=true
+          if [ -n "$RUN_FORMAT" ]; then bash -c "$RUN_FORMAT" || ok=false; fi
+          if [ "$ok" = true ]; then bash -c "$RUN_TESTS" || ok=false; fi
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+
+      - name: Sample after
+        if: steps.suite.outputs.ok == 'true'
+        run: |
+          set +e
+          # The sample refuses to mutate a file with uncommitted changes; production code must have none anyway.
+          mapfile -t args < "$RUNNER_TEMP/sample-args"
+          python3 "$RUNNER_TEMP/fleet-tools/mutation-sample" --repo . "${args[@]}" \
+            --seed "$SEED" --timeout 900 --out "$RUNNER_TEMP/after.json"
+          [ $? = 2 ] && exit 1
+          exit 0
+
+      - name: Decide
+        id: decide
+        if: steps.suite.outputs.ok == 'true'
+        run: |
+          set +e
+          mapfile -t args < "$RUNNER_TEMP/verify-args"
+          python3 "$RUNNER_TEMP/fleet-tools/test-improvement-verify" --repo . --base "$BASE_SHA" "${args[@]}" \
+            --before "$RUNNER_TEMP/before.json" --after "$RUNNER_TEMP/after.json" \
+            --out "$RUNNER_TEMP/report.md"
+          code=$?
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+          [ "$code" = 2 ] && exit 1
+          echo "propose=$([ $code = 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Propose
+        if: steps.decide.outputs.propose == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          branch="test-improvement/$SEED"
+          gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898333+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          # The verifier has just established that every change is under the tests directories.
+          git add -A
+          git commit -m "Tests that notice deliberate bugs they missed (mutation sample, week $SEED)"
+          git push -f origin "$branch"
+          {
+            cat "$RUNNER_TEMP/report.md"
+            echo
+            echo "Drafted by the weekly unit test improvement job, and checked mechanically before this was opened: only test files changed, nothing removed, the full suite passes, and the deliberate bugs above are caught. A person reviews and merges; nothing here merges itself."
+            echo
+            echo "**CI has not run on this pull request**: GitHub does not start workflows for a pull request a workflow opened. Close and reopen it to run CI before reviewing."
+          } > "$RUNNER_TEMP/body.md"
+          gh label create test-improvement --color 1f7a4d --description "Weekly unit test improvement" 2>/dev/null || true
+          gh pr create --base "${DEFAULT_BRANCH:-main}" --head "$branch" --label test-improvement \
+            --title "Tests that notice deliberate bugs they missed (week $SEED)" --body-file "$RUNNER_TEMP/body.md"
+
+      - name: Say why nothing was proposed
+        if: always() && steps.configured.outputs.go == 'true' && steps.decide.outputs.propose != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MISSED: ${{ steps.before.outputs.missed }}
+          SUITE: ${{ steps.suite.outputs.ok }}
+        run: |
+          {
+            echo "### Unit test improvement: nothing proposed this week"
+            echo
+            if [ "$MISSED" = "0" ]; then echo "Every sampled deliberate bug was already caught."
+            elif [ "$SUITE" = "false" ]; then echo "The drafted tests did not pass, or were not formatted, so they were discarded."
+            elif [ -f "$RUNNER_TEMP/report.md" ]; then cat "$RUNNER_TEMP/report.md"
+            else echo "The run stopped before a decision; see the run log."; fi
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$RUNNER_TEMP/why.md"
+          cat "$RUNNER_TEMP/why.md" >> "$GITHUB_STEP_SUMMARY"
+          issue=$(gh issue list --label mutation-sample --state open --json number --jq '.[0].number')
+          if [ -n "$issue" ]; then gh issue comment "$issue" --body-file "$RUNNER_TEMP/why.md"; fi

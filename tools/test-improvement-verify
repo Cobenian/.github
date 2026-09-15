@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""test-improvement-verify — decide whether a change to unit tests may be proposed.
+
+    tools/test-improvement-verify --repo . --base <sha> \
+        --before mutation-before.json --after mutation-after.json --out report.md
+
+THE ONE COPY. Lives in Cobenian/.github and is checked out by the reusable test-improvement.yml at
+the ref it was called at. Change it here.
+
+A weekly job asks a model to strengthen a repository's unit tests so they notice deliberate bugs
+the mutation sample found they miss (tools/mutation-sample). A model can make a suite greener by
+testing less, and a suite that tests less looks exactly like one that tests better from a green
+build. So a change is proposed only when every one of these holds, each read from the record and
+never from the model's own account of what it did:
+
+  1. ONLY TESTS CHANGED. Every changed path is under a tests directory (--tests-dir, repeatable,
+     globs allowed: `test`, `apps/*/test`, `tests`). Production code is not the model's to touch,
+     and a test "fixed" by changing the code it tests has hidden the bug.
+  2. NOTHING WAS REMOVED. No test file deleted; no test (by name) gone from any file; no file with
+     fewer assertions than it had.
+       Elixir (.ex, .exs): tests are `test "name"`; assertions are assert/refute and their variants.
+       Python (.py): tests are `def test_name` functions, and for suites of standalone scripts the
+       first string given to check(...) or expect(...); assertions are `assert`, `self.assert*`,
+       check(...) and expect(...).
+  3. NO REQUIREMENT LOST. Every requirement identifier (PANEL-TB-010) and citation (§4.1) the tests
+     named before, they still name. Coverage counts those names.
+  4. EVERY BUG CAUGHT BEFORE IS STILL CAUGHT, and at least one it missed is now caught. Mutants are
+     matched by file, line and operator, so the same deliberate bug is compared.
+
+The full suite passing and formatting are checked by the workflow around this, which runs them.
+
+    0  may be proposed        1  refused, with the reasons        2  could not judge
+"""
+import argparse
+import fnmatch
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+EX_TEST_NAME = re.compile(r'^\s*test\s+"((?:[^"\\]|\\.)*)"', re.M)
+EX_ASSERTION = re.compile(r"\b(assert|refute)(_\w+)?\b")
+PY_TEST_NAME = re.compile(r"^\s*(?:async\s+)?def\s+(test_\w+)\s*\(|\b(?:check|expect)\(\s*[fr]?(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*')", re.M)
+PY_ASSERTION = re.compile(r"^\s*assert\b|\bself\.assert\w+\(|(?<![\w.])(?:check|expect)\(", re.M)
+REQUIREMENT = re.compile(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d{2,}(?:\.\d+)?\b|§\s?\d+(?:\.\d+)*")
+EXTENSIONS = (".exs", ".ex", ".py")
+
+
+def git(repo, *args):
+    p = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)}: {p.stderr.strip()}")
+    return p.stdout
+
+
+def under(path, patterns):
+    return any(fnmatch.fnmatch(path, p.rstrip("/") + "/*") for p in patterns)
+
+
+def test_names(path, text):
+    if path.endswith(".py"):
+        return {a or b for a, b in PY_TEST_NAME.findall(text)}
+    return set(EX_TEST_NAME.findall(text))
+
+
+def assertions(path, text):
+    return len((PY_ASSERTION if path.endswith(".py") else EX_ASSERTION).findall(text))
+
+
+def tree_text(repo, base, patterns):
+    """Every test file's text, at base and now: {path: text}."""
+    listed = git(repo, "ls-tree", "-r", "--name-only", base).split("\n")
+    before = {}
+    for p in listed:
+        if p.endswith(EXTENSIONS) and under(p, patterns):
+            before[p] = git(repo, "show", f"{base}:{p}")
+    tracked_now = git(repo, "ls-files", "--cached", "--others", "--exclude-standard").split("\n")
+    after = {}
+    for p in tracked_now:
+        f = pathlib.Path(repo) / p
+        if p.endswith(EXTENSIONS) and under(p, patterns) and f.is_file():
+            after[p] = f.read_text()
+    return before, after
+
+
+def mutant_key(m):
+    return (m["file"], m["line"], m["from"], m["to"])
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--repo", default=".")
+    ap.add_argument("--base", required=True)
+    ap.add_argument("--tests-dir", action="append", default=[], help="glob; repeatable (default: test)")
+    ap.add_argument("--before", required=True)
+    ap.add_argument("--after", required=True)
+    ap.add_argument("--out")
+    a = ap.parse_args()
+    repo = pathlib.Path(a.repo).resolve()
+    patterns = a.tests_dir or ["test"]
+
+    try:
+        before_m = json.loads(pathlib.Path(a.before).read_text())
+        after_m = json.loads(pathlib.Path(a.after).read_text())
+        changed = [p for p in git(repo, "diff", "--name-only", a.base).split("\n") if p]
+        untracked = [p for p in git(repo, "ls-files", "--others", "--exclude-standard").split("\n") if p]
+        before_t, after_t = tree_text(repo, a.base, patterns)
+    except (OSError, ValueError, RuntimeError) as e:
+        print(f"could not judge: {e}", file=sys.stderr)
+        return 2
+
+    changed = sorted(set(changed + untracked))
+    refusals = []
+    where = ", ".join(p.rstrip("/") + "/" for p in patterns)
+
+    # 1. only tests
+    outside = [p for p in changed if not under(p, patterns)]
+    if outside:
+        refusals.append("changed files outside " + where + ": " + ", ".join(outside))
+    if not changed:
+        refusals.append("nothing changed")
+
+    # 2. nothing removed
+    for path, text in sorted(before_t.items()):
+        if path not in after_t:
+            refusals.append(f"deleted {path}")
+            continue
+        gone = sorted(test_names(path, text) - test_names(path, after_t[path]))
+        if gone:
+            refusals.append(f"{path}: removed or renamed test(s) " + "; ".join(f'"{g.strip(chr(34) + chr(39))}"' for g in gone))
+        fewer = assertions(path, after_t[path]) - assertions(path, text)
+        if fewer < 0:
+            refusals.append(f"{path}: {-fewer} fewer assertion(s)")
+
+    # 3. no requirement lost
+    named_before = {m for t in before_t.values() for m in REQUIREMENT.findall(t or "")}
+    named_after = {m for t in after_t.values() for m in REQUIREMENT.findall(t or "")}
+    lost = sorted(named_before - named_after)
+    if lost:
+        refusals.append("requirements no longer named by any test: " + ", ".join(lost))
+
+    # 4. mutants
+    if (before_m.get("seed"), before_m.get("paths")) != (after_m.get("seed"), after_m.get("paths")):
+        print("could not judge: the two mutation samples used different seeds or paths", file=sys.stderr)
+        return 2
+    killed_before = {mutant_key(m) for m in before_m["mutants"] if m["outcome"] == "killed"}
+    killed_after = {mutant_key(m) for m in after_m["mutants"] if m["outcome"] == "killed"}
+    missed_before = {mutant_key(m) for m in before_m["mutants"] if m["outcome"] in ("survived", "untested")}
+    no_longer = sorted(killed_before - killed_after)
+    newly = sorted(killed_after & missed_before)
+    if no_longer:
+        refusals.append("deliberate bugs caught before and not now: "
+                        + ", ".join(f"{f}:{l} {x}→{y}" for f, l, x, y in no_longer))
+    if not newly:
+        refusals.append("no deliberate bug the tests missed is caught now")
+
+    lines = ["### Unit test improvement", ""]
+    lines.append(f"Deliberate bugs caught: **{len(killed_before)} → {len(killed_after)}** "
+                 f"of {before_m.get('sampled')} sampled (seed {before_m.get('seed')}).")
+    lines.append("")
+    if newly:
+        lines += ["Newly caught:", "", "| Where | Mutation |", "|---|---|"]
+        lines += [f"| `{f}:{l}` | `{x}` → `{y}` |" for f, l, x, y in newly]
+        lines.append("")
+    lines.append("Checked: only files under " + where + " changed; no test, assertion, test file or "
+                 "requirement name removed; every bug caught before is still caught.")
+    if changed:
+        lines += ["", "Files: " + ", ".join(f"`{p}`" for p in changed)]
+    if refusals:
+        lines = ["### Unit test improvement refused", ""] + [f"- {r}" for r in refusals]
+
+    text = "\n".join(lines) + "\n"
+    if a.out:
+        pathlib.Path(a.out).write_text(text)
+    print(text)
+    return 1 if refusals else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

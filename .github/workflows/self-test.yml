@@ -29,6 +29,16 @@ jobs:
       - name: a scan posture never reports clean from a scanner that could not look
         run: bash tests/scan-posture-test.sh
 
+      # The weekly mutation sample and unit test improvement jobs run in every app repository
+      # from the tools in tools/, checked out at the ref the caller pinned. These are the only
+      # place those tools, and the steps that decide whether the jobs are configured, are tested.
+      - name: mutation-sample breaks only real operators, Elixir and Python, and restores every file
+        run: python3 tests/mutation-sample-test.py
+      - name: test-improvement-verify refuses every way a suite can get greener by testing less
+        run: python3 tests/test-improvement-verify-test.py
+      - name: a mutation or test improvement job that is not configured fails and says so
+        run: python3 tests/test-improvement-workflow-test.py
+
       # Every workflow must at least parse. A syntax error here is fourteen repositories'
       # CI failing at once.
       - name: every workflow parses

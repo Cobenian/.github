@@ -1,0 +1,239 @@
+# REUSABLE weekly mutation sample (workflow_call) — every Cobenian app, Elixir or Python.
+#
+#   uses: Cobenian/.github/.github/workflows/mutation.yml@v1
+#   (thin caller: templates/mutation.yml)
+#
+# Breaks one operator at a time in a sample of sites on the files a repository lists in
+# .github/mutation/paths.txt (its money, permission, token and data-write code), runs the tests
+# that name each file, and reports which deliberate bugs no test noticed. Report-only: it never
+# gates a merge, and a survivor is a test to write, not a build to block. The score and the
+# survivors go to the job summary, to the repository's open `mutation-sample` issue (created if
+# absent), and to an artifact.
+#
+# A different sample each ISO week (the seed is the week), so over time the whole surface is
+# visited. The unit test improvement job (test-improvement.yml) runs the next day with the same
+# seed, so it works on the same breaks this reported.
+#
+# THE TOOL IS NOT COPIED INTO REPOSITORIES. It is checked out from this repository at the exact
+# commit this workflow was called at (job.workflow_sha), so `@v1` means the same tool and
+# workflow together, and there is one copy: tools/mutation-sample.
+#
+# NOTHING IS NOT A PASS. A repository with no paths file, or one that lists nothing, fails the run
+# with "not configured" rather than reporting a clean sample of zero files; a sample that could
+# not measure (the chosen tests fail before any mutation) fails the run too.
+name: Mutation sample (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: "elixir | python (required — the tool and toolchain differ)"
+        type: string
+        required: true
+      paths_file:
+        description: "the files to mutate, one glob per line, `#` comments allowed"
+        type: string
+        default: ".github/mutation/paths.txt"
+      umbrella:
+        description: "an Elixir umbrella: tests default to apps/*/test"
+        type: boolean
+        default: false
+      tests_dir:
+        description: "space-separated globs where tests live; default `test` (elixir), `apps/*/test` (umbrella) or `tests` (python)"
+        type: string
+        default: ""
+      mutant_command:
+        description: "command that runs the chosen test files; `{test}` runs it once per file. Default `mix test` (elixir) or `python3 {test}` (python)"
+        type: string
+        default: ""
+      setup_command:
+        description: "installs and compiles before sampling. Default `mix deps.get && mix compile` (elixir) or `pip install -r requirements.txt` when present (python)"
+        type: string
+        default: ""
+      postgres:
+        description: "start Postgres on localhost:5432 (postgres/postgres)"
+        type: boolean
+        default: false
+      postgres_image:
+        type: string
+        default: "postgres:17"
+      sample:
+        type: number
+        default: 25
+      elixir-version:
+        type: string
+        default: "1.20.3"
+      otp-version:
+        type: string
+        default: "29.0.5"
+      python-version:
+        type: string
+        default: "3.13"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sample:
+    name: Mutation sample
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      MIX_ENV: test
+      # A .pyc written beside production code is an untracked change outside the tests, which the
+      # verifier refuses; and a mutated module must never be served from a stale bytecode cache.
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Configured?
+        env:
+          LANGUAGE: ${{ inputs.language }}
+          UMBRELLA: ${{ inputs.umbrella }}
+          PATHS_FILE: ${{ inputs.paths_file }}
+          TESTS_DIR: ${{ inputs.tests_dir }}
+          MUTANT_COMMAND: ${{ inputs.mutant_command }}
+          SETUP_COMMAND: ${{ inputs.setup_command }}
+          SAMPLE: ${{ inputs.sample }}
+        run: |
+          set -euo pipefail
+          set -f  # tests_dir holds globs for the tool, not for this shell
+          not_configured() {
+            echo "::error title=Mutation sample not configured::$1"
+            { echo "### Mutation sample: not configured"; echo; echo "$1"; echo; echo "Nothing was sampled. This run fails so that doing nothing never reads as a pass."; } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          case "$LANGUAGE" in
+            elixir)
+              # The same defaults as test-improvement.yml, so both jobs pick the same tests for a mutant.
+              if [ "$UMBRELLA" = true ]; then dirs_default="apps/*/test"; else dirs_default="test"; fi
+              mutant_default="mix test"; setup_default="mix deps.get && mix compile" ;;
+            python) dirs_default="tests"; mutant_default="python3 {test}"; setup_default="if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi" ;;
+            *) not_configured "language must be elixir or python, not '$LANGUAGE'." ;;
+          esac
+          [ -f "$PATHS_FILE" ] || not_configured "$PATHS_FILE does not exist. List the files to mutate there, one per line, with a comment saying why each matters."
+          grep -vE '^[[:space:]]*(#|$)' "$PATHS_FILE" > "$RUNNER_TEMP/paths" || true
+          [ -s "$RUNNER_TEMP/paths" ] || not_configured "$PATHS_FILE lists no files."
+          : > "$RUNNER_TEMP/sample-args"
+          while IFS= read -r p; do printf -- '--path\n%s\n' "$p" >> "$RUNNER_TEMP/sample-args"; done < "$RUNNER_TEMP/paths"
+          for t in ${TESTS_DIR:-$dirs_default}; do printf -- '--tests-dir\n%s\n' "$t" >> "$RUNNER_TEMP/sample-args"; done
+          printf -- '--command\n%s\n--sample\n%s\n' "${MUTANT_COMMAND:-$mutant_default}" "$SAMPLE" >> "$RUNNER_TEMP/sample-args"
+          {
+            echo "SEED=$(date -u +%G%V)"
+            echo "SETUP_COMMAND=${SETUP_COMMAND:-$setup_default}"
+          } >> "$GITHUB_ENV"
+          echo "Sampling $(wc -l < "$RUNNER_TEMP/paths") path(s) from $PATHS_FILE ($LANGUAGE)."
+
+      # The tool comes from THIS repository at the commit the caller's `@v1` resolved to.
+      # job.workflow_sha is empty only on a platform without it (GHES); refuse rather than let
+      # checkout fall back to the default branch and run a tool the tag never pointed at.
+      - name: Tool ref
+        env:
+          TOOLS_REPO: ${{ job.workflow_repository }}
+          TOOLS_SHA: ${{ job.workflow_sha }}
+        run: |
+          [ -n "$TOOLS_REPO" ] && [ -n "$TOOLS_SHA" ] || { echo "::error::job.workflow_sha is unavailable, so the tool's version cannot be pinned to this workflow's."; exit 1; }
+          echo "tools: $TOOLS_REPO@$TOOLS_SHA"
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .fleet-tools
+          persist-credentials: false
+      # Out of the working tree, so nothing the sample or a test runner walks can see or touch it.
+      - run: mv .fleet-tools/tools "$RUNNER_TEMP/fleet-tools" && rm -rf .fleet-tools
+
+      - name: Start Postgres
+        if: inputs.postgres
+        env:
+          IMAGE: ${{ inputs.postgres_image }}
+        run: |
+          docker run -d --name db -p 5432:5432 -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=postgres --health-cmd "pg_isready -U postgres" --health-interval 2s "$IMAGE"
+          for _ in $(seq 90); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' db)" = healthy ] && exit 0
+            sleep 2
+          done
+          docker logs db; echo "::error::Postgres did not become healthy"; exit 1
+
+      - uses: erlef/setup-beam@v1
+        if: inputs.language == 'elixir'
+        with:
+          elixir-version: ${{ inputs.elixir-version }}
+          otp-version: ${{ inputs.otp-version }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Cache deps and _build
+        if: inputs.language == 'elixir'
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mutation-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mutation-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-mix-
+            ${{ runner.os }}-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-mix-
+      - name: Authenticate private Hex organizations
+        if: inputs.language == 'elixir'
+        env:
+          HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
+          HEX_FLEET_KEY: ${{ secrets.HEX_FLEET_KEY }}
+        run: |
+          if [ -n "$HEX_ORG_KEY" ]; then mix hex.organization auth cobenian --key "$HEX_ORG_KEY"; fi
+          if [ -n "$HEX_FLEET_KEY" ]; then mix hex.organization auth fleet --key "$HEX_FLEET_KEY"; fi
+      - name: Set up
+        run: bash -euo pipefail -c "$SETUP_COMMAND"
+
+      - name: Sample
+        run: |
+          set +e
+          mapfile -t args < "$RUNNER_TEMP/sample-args"
+          python3 "$RUNNER_TEMP/fleet-tools/mutation-sample" --repo . "${args[@]}" \
+            --seed "$SEED" --timeout 900 --out mutation.json
+          code=$?
+          # 0 all caught, 1 survivors (expected; report-only), 2 could not measure (a real failure).
+          if [ "$code" = 2 ]; then
+            { echo "### Mutation sample: could not measure"; echo; echo "The chosen tests failed before anything was mutated, or no listed file exists. See the Sample step's log."; } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          exit 0
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mutation-sample
+          path: mutation.json
+          if-no-files-found: ignore
+
+      - name: Report
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY' > report.md
+          import json
+          r = json.load(open("mutation.json"))
+          c = r["counts"]
+          print(f"### Mutation sample, seed {r['seed']}: {c['killed']} of {c['killed'] + c['survived'] + c['untested']} caught"
+                f" ({'n/a' if r['score'] is None else round(r['score'] * 100)}%)\n")
+          print(f"{r['sampled']} of {r['candidates']} sites; {c['invalid']} did not compile, {c['timeout']} timed out.\n")
+          if r.get("unsupported"):
+              print("Not sampled (neither Elixir nor Python): " + ", ".join(f"`{u}`" for u in r["unsupported"]) + "\n")
+          missed = [m for m in r["mutants"] if m["outcome"] in ("survived", "untested")]
+          if missed:
+              print("| Where | Mutation | Code | Outcome |\n|---|---|---|---|")
+              for m in missed:
+                  code = m["code"].replace("|", "\\|")
+                  print(f"| `{m['file']}:{m['line']}` | `{m['from']}` → `{m['to']}` | `{code}` | {m['outcome']} |")
+          PY
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          issue=$(gh issue list --label mutation-sample --state open --json number --jq '.[0].number')
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body-file report.md
+          else
+            gh label create mutation-sample --color 5319e7 --description "Weekly mutation sample" 2>/dev/null || true
+            gh issue create --title "Tests that miss deliberate bugs (weekly mutation sample)" --label mutation-sample --body-file report.md
+          fi

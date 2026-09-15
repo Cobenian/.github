@@ -1,0 +1,26 @@
+# Weekly unit test improvement: a model drafts tests that catch the deliberate bugs Monday's
+# mutation sample says the tests miss; a mechanical verifier decides whether a pull request may be
+# opened, and a person reviews it. Needs the ANTHROPIC_API_KEY secret (org secret, shared with this
+# repository); without it the run FAILS with "not configured" rather than passing having done
+# nothing. Copy to .github/workflows/test-improvement.yml. See Cobenian/.github
+# .github/workflows/test-improvement.yml for every input.
+name: Unit test improvement
+
+on:
+  schedule:
+    - cron: "17 7 * * 2"   # Tuesday, after mutation.yml, same ISO-week seed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  improve:
+    if: github.repository_owner == 'Cobenian'
+    uses: Cobenian/.github/.github/workflows/test-improvement.yml@v1
+    with:
+      language: elixir     # elixir | python
+      postgres: true
+    secrets: inherit
