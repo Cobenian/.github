@@ -1,0 +1,24 @@
+# Weekly mutation sample: which deliberate bugs in this repository's money, permission, token and
+# data-write code do its tests fail to notice? Report-only; posts to the open `mutation-sample`
+# issue. Copy to .github/workflows/mutation.yml and list the files in .github/mutation/paths.txt.
+# See Cobenian/.github .github/workflows/mutation.yml for every input.
+name: Mutation sample
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"   # Monday; test-improvement.yml runs Tuesday on the same ISO-week seed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sample:
+    # A mirrored copy of this repository in another organisation must not run it.
+    if: github.repository_owner == 'Cobenian'
+    uses: Cobenian/.github/.github/workflows/mutation.yml@v1
+    with:
+      language: elixir     # elixir | python
+      postgres: true
+    secrets: inherit

@@ -22,6 +22,10 @@ The canonical, org-wide normative docs (RFC 2119). Every product cites these.
   workflows/
     elixir-ci.yml          # REUSABLE CI (workflow_call) — the heavy lifting
     fly-deploy.yml         # REUSABLE deploy (workflow_call) — retry + --wait-timeout + smoke
+    mutation.yml           # REUSABLE weekly mutation sample (workflow_call)
+    test-improvement.yml   # REUSABLE weekly unit test improvement (workflow_call)
+tools/                     # mutation-sample, test-improvement-verify — checked out by those two
+tests/                     # self-test.yml runs these
   PULL_REQUEST_TEMPLATE.md # org-default PR template (inherited)
   ISSUE_TEMPLATE/
     bug_report.md          # org-default (inherited)
@@ -29,6 +33,8 @@ The canonical, org-wide normative docs (RFC 2119). Every product cites these.
 templates/                 # COPY these into each consumer repo (not inherited)
   ci.yml                   # thin caller of the reusable CI
   fly-deploy.yml           # thin caller of the reusable deploy (workflow_run trigger + app inputs)
+  mutation.yml             # thin caller of the weekly mutation sample
+  test-improvement.yml     # thin caller of the weekly unit test improvement
   dependabot-app.yml       # → .github/dependabot.yml  (apps)
   dependabot-library.yml   # → .github/dependabot.yml  (libraries)
   CODEOWNERS               # → .github/CODEOWNERS       (not inheritable)
@@ -84,6 +90,21 @@ jobs:
 | `otp-version` | `29.0.5` | |
 | `postgres_image` | `postgres:17` | |
 | `gitleaks_version` | `8.21.2` | CLI binary (the action needs a paid org license) |
+
+## Weekly mutation sample and unit test improvement
+
+Two reusable workflows, one pair of tools, every app (Elixir or Python):
+
+| Workflow | When (caller's cron) | Does |
+|---|---|---|
+| `mutation.yml` | Monday 06:17 UTC | Breaks one operator at a time in the files listed in `.github/mutation/paths.txt`, runs the tests that name each file, posts which breaks no test noticed to the `mutation-sample` issue. Report-only. |
+| `test-improvement.yml` | Tuesday 07:17 UTC | Same ISO-week seed. A model drafts tests for the missed breaks; `tools/test-improvement-verify` decides from the record (only tests changed, nothing removed, suite green, every earlier catch kept, at least one new catch) whether to open ONE pull request for a person. |
+
+- **Tools live here only** (`tools/mutation-sample`, `tools/test-improvement-verify`). The workflows check them out at `job.workflow_sha`, so moving `v1` moves workflow and tools together. Tested by `self-test.yml`.
+- **Per repo:** copy `templates/mutation.yml` and `templates/test-improvement.yml`, set `language` (and `postgres`, `umbrella`), and write `.github/mutation/paths.txt`: 3-10 files where a wrong operator would cost money, leak access or corrupt data, each with a `#` comment saying why.
+- **Not configured is a failure.** No paths file, an empty one, or (for test improvement) no `ANTHROPIC_API_KEY` secret fails the run with "not configured" in the job summary. A green run always did something.
+- **Model:** `TEST_IMPROVEMENT_MODEL` variable, default `claude-sonnet-5`.
+- A pull request opened by the job does not trigger CI (GitHub will not start workflows for a pull request `GITHUB_TOKEN` opened); close and reopen it to run CI.
 
 ## ⚠️ Branch-protection check name
 

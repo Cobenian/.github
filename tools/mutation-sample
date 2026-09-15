@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""mutation-sample — break code on purpose, a sample at a time, and say which tests noticed.
+
+    tools/mutation-sample --repo ../cobenian-panel \
+        --path 'lib/cobenian_panel/time_billing/invoicing.ex' --path 'lib/**/authz.ex' \
+        --sample 30 --seed 13 --out report.json
+
+    tools/mutation-sample --repo ../cobenian-assay-runner --path runner/bounds.py \
+        --command 'python3 {test}' --sample 25 --seed 202638
+
+THE ONE COPY. This file lives in Cobenian/.github and is checked out by the reusable
+`mutation.yml` and `test-improvement.yml` workflows at the ref they were called at. It started in
+cobenian-control-plane/tools and was vendored into cobenian-panel; the reusable workflows replace
+both uses. Change it here.
+
+A unit test that cannot fail when its code breaks is counted as coverage anyway; nothing measured
+that (roadmap: mutation sampling on money and permission paths). This measures it the direct way.
+
+WHAT A MUTANT IS. One operator on one line, swapped for its opposite. A small set on purpose: each
+is a real bug a person could write, and every one the tests do not notice is a sentence someone
+can read.
+
+  Elixir (.ex, .exs): == and !=, >= and >, <= and <, > and >=, < and <=, `and` and `or`, true and
+    false, + 1 and - 1. Only operators with spaces around them, outside comments, heredocs,
+    @attributes and string literals, so `->`, `|>`, `<-`, `=>` and text in a message are never
+    touched.
+  Python (.py, or an extensionless file whose first line is a python shebang): the same
+    comparisons, `and`/`or`, `is`/`is not`, True/False, and binary + and -, * and /. Found with
+    Python's own tokenizer, so strings, docstrings and comments are never touched, and unary minus,
+    `*args` and `import *` are not arithmetic.
+
+WHICH TESTS. The test files that name the mutated code, or failing that the file mirroring its
+path. A mutant no test file names is `untested` rather than guessed at with the whole suite.
+
+  Elixir: a `*_test.exs` file containing the module name from `defmodule` (not merely a submodule
+    of it: Accounts.Scope does not name Accounts). Mirror:
+    <project>/test/<path under lib>_test.exs.
+  Python: a `.py` file under the tests directory that imports the module (`import runner.walk`,
+    `from runner.walk import ...`, `from runner import walk`) or names the file as a quoted string
+    (ROOT / "tools" / "mutation-sample"). Mirror: tests/test_<name>.py.
+
+  --tests-dir (repeatable, globs allowed) says where to look. Default: `test` and `apps/*/test` for
+  Elixir, `tests` and `test` for Python. Each Elixir test file runs from its own Mix project (the
+  nearest directory with a mix.exs), so an umbrella's apps/*/test work without configuration.
+
+THE COMMAND. `--command` without `{test}` gets the chosen test files appended (`mix test a b`,
+`pytest a b`). With `{test}` it runs once per file (`python3 {test}`) — for suites of standalone
+test scripts — and the tests fail if any file fails.
+
+OUTCOMES, kept apart because they mean different things:
+    killed     the tests failed with the mutant in place: they notice this bug
+    survived   the tests passed with it: they do not
+    untested   no test names the code
+    invalid    the mutant did not compile: it measured nothing
+    timeout    the tests did not finish: it measured nothing
+
+The score is killed / (killed + survived + untested). Invalid and timed-out mutants are left out
+of both sides, because counting them either way would claim a measurement that was not made.
+
+THE BASELINE RUNS FIRST. If the chosen tests fail before anything is mutated, a mutant "killed" by
+them proves nothing, so the tool stops and says so (exit 2).
+
+EVERY FILE IS RESTORED, whatever happens, and the tool refuses a repository with uncommitted
+changes to the files it would touch, so a crash can never leave a mutant behind unnoticed.
+
+    0  sampled and reported        1  some mutant survived or was untested        2  could not measure
+"""
+import argparse
+import glob
+import io
+import json
+import keyword
+import pathlib
+import random
+import re
+import shlex
+import subprocess
+import sys
+import time
+import tokenize
+
+ELIXIR_OPERATORS = [
+    (" == ", " != "), (" != ", " == "), (" >= ", " > "), (" <= ", " < "),
+    (" > ", " >= "), (" < ", " <= "), (" and ", " or "), (" or ", " and "),
+    (" + 1", " - 1"), (" - 1", " + 1"),
+]
+ELIXIR_WORDS = [("true", "false"), ("false", "true")]
+PY_COMPARE = {"==": "!=", "!=": "==", ">=": ">", "<=": "<", ">": ">=", "<": "<="}
+PY_ARITH = {"+": "-", "-": "+", "*": "/", "/": "*"}
+PY_WORDS = {"and": "or", "or": "and", "True": "False", "False": "True"}
+MODULE = re.compile(r"^\s*defmodule\s+([A-Z][\w.]*)\s+do")
+INVALID = ("== Compilation error", "(CompileError)", "(SyntaxError)", "SyntaxError:", "IndentationError:")
+
+
+def language(path):
+    if path.suffix in (".ex", ".exs"):
+        return "elixir"
+    if path.suffix == ".py":
+        return "python"
+    if path.suffix == "":
+        try:
+            with path.open() as f:
+                first = f.readline()
+        except (OSError, UnicodeDecodeError):
+            return None
+        if first.startswith("#!") and "python" in first:
+            return "python"
+    return None
+
+
+# ---------------------------------------------------------------- Elixir
+
+def in_string(line, col):
+    """Whether position `col` sits inside a double-quoted string on this line."""
+    quotes = 0
+    i = 0
+    while i < col:
+        if line[i] == "\\":
+            i += 2
+            continue
+        if line[i] == '"':
+            quotes += 1
+        i += 1
+    return quotes % 2 == 1
+
+
+def elixir_sites(text):
+    """Every (line index, column, from, to) that can be mutated in one Elixir file."""
+    out, heredoc = [], False
+    for n, line in enumerate(text.split("\n")):
+        stripped = line.strip()
+        if stripped.count('"""') % 2 == 1:
+            heredoc = not heredoc
+            continue
+        if heredoc or stripped.startswith("#") or stripped.startswith("@"):
+            continue
+        code = line.split(" #", 1)[0]
+        for a, b in ELIXIR_OPERATORS:
+            start = 0
+            while (i := code.find(a, start)) != -1:
+                if not in_string(line, i):
+                    out.append((n, i, a, b))
+                start = i + 1
+        for a, b in ELIXIR_WORDS:
+            for m in re.finditer(rf"(?<![:\w]){a}(?![\w:?])", code):
+                if not in_string(line, m.start()):
+                    out.append((n, m.start(), a, b))
+    return out
+
+
+def module_of(text):
+    for line in text.split("\n"):
+        if (m := MODULE.match(line)):
+            return m.group(1)
+    return None
+
+
+# ---------------------------------------------------------------- Python
+
+OPERAND_END = {tokenize.NAME, tokenize.NUMBER, tokenize.STRING}
+
+
+def python_sites(text):
+    """Every (line index, column, from, to) that can be mutated in one Python file.
+
+    Python's tokenizer, not a text search: a token inside a string or comment is not an operator,
+    and whether + is binary depends on what came before it."""
+    out = []
+    try:
+        toks = [t for t in tokenize.generate_tokens(io.StringIO(text).readline)
+                if t.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT, tokenize.INDENT,
+                                  tokenize.DEDENT, tokenize.ENCODING)]
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return out
+    for i, t in enumerate(toks):
+        prev = toks[i - 1] if i else None
+        nxt = toks[i + 1] if i + 1 < len(toks) else None
+        (row, col), (erow, ecol) = t.start, t.end
+        if t.type == tokenize.OP and t.string in PY_COMPARE:
+            out.append((row - 1, col, t.string, PY_COMPARE[t.string]))
+        elif t.type == tokenize.OP and t.string in PY_ARITH:
+            binary = prev is not None and (
+                (prev.type in OPERAND_END and not (prev.type == tokenize.NAME and keyword.iskeyword(prev.string)
+                                                   and prev.string not in ("True", "False", "None")))
+                or (prev.type == tokenize.OP and prev.string in (")", "]", "}")))
+            if binary and nxt is not None and not (nxt.type == tokenize.OP and nxt.string in (",", ")", "]")):
+                out.append((row - 1, col, t.string, PY_ARITH[t.string]))
+        elif t.type == tokenize.NAME and t.string in PY_WORDS:
+            out.append((row - 1, col, t.string, PY_WORDS[t.string]))
+        elif t.type == tokenize.NAME and t.string == "is":
+            if nxt is not None and nxt.type == tokenize.NAME and nxt.string == "not" and nxt.start[0] == row:
+                out.append((row - 1, col, text.split("\n")[row - 1][col:nxt.end[1]], "is"))
+            else:
+                out.append((row - 1, col, "is", "is not"))
+    return out
+
+
+def python_module_patterns(repo, source):
+    """How a test names a Python file. A bare quoted name ("assay") is NOT one: it is as likely a
+    dict key as a path, so an extensionless script is named only by its path."""
+    rel = source.relative_to(repo)
+    q = "[\"']"
+    patterns = [rf"{q}(?:[^\"'\n]*/)?{re.escape(rel.as_posix())}{q}"]          # "collect/assay"
+    if len(rel.parts) > 1:                                                     # "tools" / "cite-tests"
+        patterns.append(rf"{q}{re.escape(rel.parts[-2])}{q}\s*/\s*{q}{re.escape(rel.name)}{q}")
+    if rel.suffix == ".py":
+        patterns.append(rf"{q}(?:[^\"'\n]*/)?{re.escape(rel.name)}{q}")        # "bounds.py"
+        parts = list(rel.with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        if parts and all(p.isidentifier() for p in parts):
+            dotted = ".".join(parts)
+            patterns += [rf"^\s*import\s+{re.escape(dotted)}\b", rf"^\s*from\s+{re.escape(dotted)}\s+import\b"]
+            if len(parts) > 1:
+                parent = ".".join(parts[:-1])
+                patterns.append(rf"^\s*from\s+{re.escape(parent)}\s+import\s+\(?[^\n#)]*\b{re.escape(parts[-1])}\b")
+    return re.compile("|".join(patterns), re.M)
+
+
+# ---------------------------------------------------------------- shared
+
+def test_dirs(repo, given, lang):
+    patterns = given or (["test", "apps/*/test"] if lang == "elixir" else ["tests", "test"])
+    dirs = []
+    for p in patterns:
+        dirs += [pathlib.Path(d) for d in sorted(glob.glob(str(repo / p))) if pathlib.Path(d).is_dir()]
+    return dirs
+
+
+def project_root(repo, path, lang):
+    """Where a test file runs from: its nearest Mix project for Elixir, the repository otherwise."""
+    if lang != "elixir":
+        return repo
+    for d in path.parents:
+        if (d / "mix.exs").exists():
+            return d
+        if d == repo:
+            break
+    return repo
+
+
+def related_tests(repo, source, lang, dirs):
+    text = source.read_text()
+    found = []
+    if lang == "elixir":
+        module = module_of(text)
+        if module:
+            pattern = re.compile(rf"\b{re.escape(module)}\b(?!\.[A-Z])")
+            candidates = [t for d in dirs for t in sorted(d.rglob("*_test.exs"))]
+        else:
+            pattern, candidates = None, []
+    else:
+        pattern = python_module_patterns(repo, source)
+        candidates = [t for d in dirs for t in sorted(d.rglob("*.py"))
+                      if t.name not in ("__init__.py", "conftest.py")]
+    for t in candidates:
+        if t.resolve() == source:
+            continue
+        try:
+            if pattern.search(t.read_text()):
+                found.append(t)
+        except (OSError, UnicodeDecodeError):
+            continue
+    if not found:
+        rel = source.relative_to(repo)
+        if lang == "elixir":
+            root = project_root(repo, source, lang)
+            inner = source.relative_to(root)
+            mirror = root / "test" / pathlib.Path(*inner.parts[1:]).with_name(inner.stem + "_test.exs")
+            mirrors = [mirror]
+        else:
+            mirrors = [d / f"test_{rel.stem}.py" for d in dirs]
+        found += [m for m in mirrors if m.exists()]
+    return sorted({str(t.relative_to(repo)) for t in found})
+
+
+def run_tests(repo, command, tests, timeout, lang):
+    """Run the tests; 'passed', 'failed', 'invalid' or 'timeout', with the seconds and output tail."""
+    started = time.monotonic()
+    groups = {}
+    for t in tests:
+        root = project_root(repo, repo / t, lang)
+        groups.setdefault(root, []).append(str((repo / t).relative_to(root)))
+    runs = []
+    for root, files in sorted(groups.items()):
+        if any("{test}" in part for part in command):
+            runs += [(root, [part.replace("{test}", f) for part in command]) for f in files]
+        else:
+            runs.append((root, command + files))
+    tail = ""
+    for cwd, argv in runs:
+        left = timeout - (time.monotonic() - started)
+        if left <= 0:
+            return "timeout", time.monotonic() - started, tail
+        try:
+            p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=left)
+        except subprocess.TimeoutExpired:
+            return "timeout", time.monotonic() - started, tail
+        out = p.stdout + p.stderr
+        tail = out[-400:]
+        if any(marker in out for marker in INVALID):
+            return "invalid", time.monotonic() - started, tail
+        if p.returncode != 0:
+            return "failed", time.monotonic() - started, tail
+    return "passed", time.monotonic() - started, tail
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--repo", required=True)
+    ap.add_argument("--path", action="append", required=True, help="glob, relative to the repo")
+    ap.add_argument("--tests-dir", action="append", default=[], help="glob, relative to the repo; repeatable")
+    ap.add_argument("--command", default=None, help="default: `mix test` for Elixir, `python3 {test}` for Python")
+    ap.add_argument("--sample", type=int, default=20)
+    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--out")
+    a = ap.parse_args()
+
+    repo = pathlib.Path(a.repo).resolve()
+    matched = sorted({pathlib.Path(p).resolve() for g in a.path for p in glob.glob(str(repo / g), recursive=True)
+                      if pathlib.Path(p).is_file()})
+    if not matched:
+        print("could not measure: no file matched --path", file=sys.stderr)
+        return 2
+    langs = {f: language(f) for f in matched}
+    unsupported = [str(f.relative_to(repo)) for f, lang in langs.items() if lang is None]
+    for u in unsupported:
+        print(f"skipped: {u} is neither Elixir nor Python", file=sys.stderr)
+    files = [f for f in matched if langs[f]]
+    if len({langs[f] for f in files}) > 1:
+        print("could not measure: --path matched both Elixir and Python files; sample each separately",
+              file=sys.stderr)
+        return 2
+    if not files:
+        print("could not measure: no Elixir or Python file matched --path", file=sys.stderr)
+        return 2
+    lang = langs[files[0]]
+    command = shlex.split(a.command) if a.command else (["mix", "test"] if lang == "elixir" else ["python3", "{test}"])
+
+    dirty = subprocess.run(["git", "status", "--porcelain", "--"] + [str(f) for f in files],
+                           cwd=repo, capture_output=True, text=True).stdout.strip()
+    if dirty:
+        print(f"could not measure: uncommitted changes to files this would mutate:\n{dirty}", file=sys.stderr)
+        return 2
+
+    finder = elixir_sites if lang == "elixir" else python_sites
+    candidates = [(f, *s) for f in files for s in finder(f.read_text())]
+    rng = random.Random(a.seed)
+    chosen = rng.sample(candidates, min(a.sample, len(candidates)))
+
+    dirs = test_dirs(repo, a.tests_dir, lang)
+    tests_for = {f: related_tests(repo, f, lang, dirs) for f in {c[0] for c in chosen}}
+    baseline_tests = sorted({t for ts in tests_for.values() for t in ts})
+    if baseline_tests:
+        state, secs, tail = run_tests(repo, command, baseline_tests, a.timeout, lang)
+        if state != "passed":
+            print(f"could not measure: the chosen tests do not pass before mutation ({state}):\n{tail}",
+                  file=sys.stderr)
+            return 2
+        print(f"baseline: {len(baseline_tests)} test file(s) pass ({secs:.0f}s)", file=sys.stderr)
+
+    results = []
+    for i, (f, line_no, col, frm, to) in enumerate(chosen, 1):
+        rel = str(f.relative_to(repo))
+        original = f.read_text()
+        lines = original.split("\n")
+        before = lines[line_no]
+        after = before[:col] + to + before[col + len(frm):]
+        entry = {"file": rel, "line": line_no + 1, "from": frm.strip(), "to": to.strip(),
+                 "code": before.strip()[:200], "tests": tests_for[f]}
+        if not tests_for[f]:
+            entry["outcome"] = "untested"
+        else:
+            lines[line_no] = after
+            try:
+                f.write_text("\n".join(lines))
+                state, secs, tail = run_tests(repo, command, tests_for[f], a.timeout, lang)
+            finally:
+                f.write_text(original)
+            entry["outcome"] = {"failed": "killed", "passed": "survived"}.get(state, state)
+            entry["seconds"] = round(secs)
+        results.append(entry)
+        print(f"[{i}/{len(chosen)}] {entry['outcome']:9} {rel}:{entry['line']}  {entry['from']} -> {entry['to']}",
+              file=sys.stderr)
+
+    count = {k: sum(1 for r in results if r["outcome"] == k)
+             for k in ("killed", "survived", "untested", "invalid", "timeout")}
+    measured = count["killed"] + count["survived"] + count["untested"]
+    report = {"repo": repo.name, "language": lang, "paths": a.path, "seed": a.seed,
+              "candidates": len(candidates), "sampled": len(chosen), "unsupported": unsupported,
+              "counts": count, "score": round(count["killed"] / measured, 3) if measured else None,
+              "mutants": results}
+    text = json.dumps(report, indent=2)
+    if a.out:
+        pathlib.Path(a.out).write_text(text)
+    print(text)
+    return 1 if count["survived"] or count["untested"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
