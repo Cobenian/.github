@@ -173,7 +173,7 @@ expect("an umbrella keeps its app's test change and discards the app's productio
 # fail loudly, and a successful draft that merely mentions a token must not be mistaken for one.
 print("drafting step")
 tail = draft[draft.index("claude -p"):]
-def draft_run(rc, out):
+def draft_run(rc, out, want_output=False):
     t = pathlib.Path(tempfile.mkdtemp())
     try:
         stub = t / "stub"; stub.mkdir()
@@ -182,7 +182,7 @@ def draft_run(rc, out):
         env = {"PATH": f"{stub}:{os.environ['PATH']}", "RUNNER_TEMP": str(t), "GITHUB_STEP_SUMMARY": str(t / "summary"),
                "MODEL": "m", "MAX_TURNS": "1", "ALLOWED_TOOLS": "Read"}
         p = subprocess.run([BASH, "--noprofile", "--norc", "-eo", "pipefail", "-c", tail], env=env, capture_output=True, text=True)
-        return p.returncode, (t / "summary").read_text()
+        return p.returncode, (t / "summary").read_text() + (p.stdout if want_output else "")
     finally:
         shutil.rmtree(t)
 def result(text, is_error=False, denials=(), subtype="success"):
@@ -190,6 +190,7 @@ def result(text, is_error=False, denials=(), subtype="success"):
 code, summary = draft_run(0, result("Added tests for the OAuth token refresh path"))
 expect("a successful draft that mentions an OAuth token is not failed", code == 0 and "exited 0" in summary, (code, summary))
 code, summary = draft_run(1, result("", is_error=True, subtype="error_max_turns"))
+expect("a run that used every turn says so, with the limit", code == 0 and "error_max_turns" in summary and "all 1 turns" in summary, (code, summary))
 expect("a non-zero exit without an auth error is recorded, and the verifier still decides",
        code == 0 and "exited 1" in summary, (code, summary))
 code, summary = draft_run(1, 'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid bearer token"}}')
@@ -203,6 +204,8 @@ expect("plain-text authentication output with a failing exit still fails loudly"
 code, summary = draft_run(0, result("Not logged in · Please run /login", is_error=True))
 expect("a result marked as an error that says it is not logged in fails even when the exit code is 0",
        code == 1 and "could not authenticate" in summary, (code, summary))
+code, output = draft_run(0, result("x", denials=[{"tool_name": "Bash", "tool_input": {"command": "find /"}}] * 3), want_output=True)
+expect("the refusal count matches the refusals listed", "3 refused" in output, output)
 code, summary = draft_run(0, result("The edit needs your approval", denials=[
     {"tool_name": "Edit", "tool_input": {"file_path": "/w/test/a_test.exs"}}]))
 expect("a refused edit is named in the summary with its file, and the step still records the exit",
