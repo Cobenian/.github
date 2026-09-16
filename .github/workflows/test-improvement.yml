@@ -183,9 +183,12 @@ jobs:
             # WRITES ARE LIMITED TO THE TEST DIRECTORIES, not only asked to be. The prompt said
             # "change files under test only", and a run on cobenian-logs (16 Sep) still left
             # lib/cobenian_logs/logs.ex modified, so the after-sample refused to measure and the
-            # week drafted nothing. Write and Edit are granted per test directory instead.
+            # week drafted nothing. Claude Code checks every file-editing tool, Write included,
+            # against Edit(path) rules only, so one Edit rule per test directory limits them all.
+            # The directories are split without globbing, so `apps/*/test` stays a pattern.
             scoped=""
-            for t in $dirs; do scoped="$scoped,Write($t/**),Edit($t/**)"; done
+            read -r -a tdirs <<< "$dirs"
+            for t in "${tdirs[@]}"; do scoped="$scoped,Edit($t/**)"; done
             echo "ALLOWED_TOOLS=${tools_default/Read,Write,Edit,/Read${scoped},}"
           } >> "$GITHUB_ENV"
 

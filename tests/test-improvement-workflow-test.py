@@ -123,6 +123,52 @@ m = run("mutation.yml", {"LANGUAGE": "python"}, files=PATHS)
 expect("both jobs hand the tool the same arguments, so Tuesday's sample is Monday's",
        bool(ti_python_args) and m["sample_args_raw"] == ti_python_args, (m["sample_args_raw"], ti_python_args))
 
+# WRITES STAY IN THE TESTS (2026-09-16). A run on cobenian-logs left production code modified and the
+# week measured nothing. The model's file tools are limited to the test directories, and a step after
+# drafting discards anything else; both are exercised here with the shell that ships.
+print("keeping to the tests")
+def tools(r):
+    m = re.search(r"^ALLOWED_TOOLS=(.*)$", r["env"], re.M)
+    return m.group(1).split(",") if m else []
+key = {"CLAUDE_CODE_OAUTH_TOKEN": "present"}
+for lang, extra, dirs in (("elixir", {}, ["test"]), ("elixir", {"UMBRELLA": "true"}, ["apps/*/test"]), ("python", {}, ["tests"])):
+    r = run("test-improvement.yml", {"LANGUAGE": lang, **extra, **key}, files=PATHS)
+    t = tools(r)
+    expect(f"{lang}{' umbrella' if extra else ''}: file edits are allowed only under {dirs}",
+           [x for x in t if x.startswith("Edit(")] == [f"Edit({d}/**)" for d in dirs]
+           and "Write" not in t and "Edit" not in t and not any(x.startswith("Write(") for x in t), t)
+
+keep = step("test-improvement.yml", "Keep only test changes")
+def keep_run(tests_dirs, base, change):
+    d = pathlib.Path(tempfile.mkdtemp())
+    try:
+        repo = d / "repo"; repo.mkdir()
+        git = lambda *a: subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True)
+        git("init", "-q")
+        for path, text in base.items():
+            (repo / path).parent.mkdir(parents=True, exist_ok=True); (repo / path).write_text(text)
+        git("add", "-A"); git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base")
+        for path, text in change.items():
+            (repo / path).parent.mkdir(parents=True, exist_ok=True); (repo / path).write_text(text)
+        (d / "summary").write_text("")
+        p = subprocess.run([BASH, "--noprofile", "--norc", "-eo", "pipefail", "-c", keep], cwd=repo,
+                           env={"PATH": os.environ["PATH"], "TESTS_DIRS": tests_dirs, "GITHUB_STEP_SUMMARY": str(d / "summary")},
+                           capture_output=True, text=True)
+        status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=repo, capture_output=True, text=True).stdout
+        return p.returncode, status, (d / "summary").read_text()
+    finally:
+        shutil.rmtree(d)
+base = {"lib/app.ex": "prod\n", "test/app_test.exs": "test\n"}
+code, status, summary = keep_run("test", base, {"test/app_test.exs": "test\nmore\n", "test/new_test.exs": "new\n"})
+expect("a draft that changed only tests keeps every change", code == 0 and "test/app_test.exs" in status and "test/new_test.exs" in status and summary == "", (code, status, summary))
+code, status, summary = keep_run("test", base, {"lib/app.ex": "prod\nedited\n", "lib/stray.ex": "x\n", "test/app_test.exs": "test\nmore\n"})
+expect("a production edit and a stray file are discarded, the test change kept, and both named",
+       code == 0 and "lib/" not in status and "test/app_test.exs" in status and "lib/app.ex" in summary and "lib/stray.ex" in summary, (code, status, summary))
+ubase = {"apps/core/lib/core.ex": "prod\n", "apps/core/test/core_test.exs": "test\n"}
+code, status, summary = keep_run("apps/*/test", ubase, {"apps/core/lib/core.ex": "edited\n", "apps/core/test/core_test.exs": "more\n"})
+expect("an umbrella keeps its app's test change and discards the app's production edit",
+       code == 0 and "apps/core/lib" not in status and "apps/core/test/core_test.exs" in status, (code, status, summary))
+
 # The end of the drafting step, run under the shell Actions uses (`bash -e -o pipefail`) with a stub
 # `claude`. The exit code must be recorded rather than killing the step, an authentication error must
 # fail loudly, and a successful draft that merely mentions a token must not be mistaken for one.
