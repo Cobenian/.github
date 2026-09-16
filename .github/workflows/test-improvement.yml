@@ -150,13 +150,13 @@ jobs:
           case "$LANGUAGE" in
             elixir)
               if [ "$UMBRELLA" = true ]; then dirs_default="apps/*/test"; else dirs_default="test"; fi
-              test_default="mix test"; mutant_default="mix test"; format_default="mix format --check-formatted"
+              test_default="mix test"; mutant_default="mix test"; format_default="mix format --check-formatted"; fix_format_default="mix format"
               setup_default="mix deps.get && mix compile"
               tools_default="Read,Write,Edit,Glob,Grep,Bash(mix test:*),Bash(mix format:*)" ;;
             python)
               dirs_default="tests"
               test_default='shopt -s nullglob; t=(tests/*.py); [ ${#t[@]} -gt 0 ] || { echo "no tests/*.py"; exit 1; }; for f in "${t[@]}"; do echo "== $f"; python3 "$f"; done'
-              mutant_default="python3 {test}"; format_default=""
+              mutant_default="python3 {test}"; format_default=""; fix_format_default=""
               setup_default="if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi"
               tools_default="Read,Write,Edit,Glob,Grep,Bash(python3:*)" ;;
             *) not_configured "language must be elixir or python, not '$LANGUAGE'." ;;
@@ -179,6 +179,9 @@ jobs:
             echo "TESTS_DIRS=$dirs"
             echo "RUN_TESTS=${TEST_COMMAND:-$test_default}"
             echo "RUN_FORMAT=${FORMAT_COMMAND:-$format_default}"
+            # How to APPLY the formatting that RUN_FORMAT checks, run on the drafted test files only.
+            # A caller that sets its own format_command gets no fixer: we cannot know its counterpart.
+            if [ -n "$FORMAT_COMMAND" ]; then echo "FIX_FORMAT="; else echo "FIX_FORMAT=$fix_format_default"; fi
             echo "RUN_SETUP=${SETUP_COMMAND:-$setup_default}"
             # The model's file tools are NOT limited by path. Proof runs on cobenian-logs (16 Sep) with
             # Edit(test/**) — and with it spelled three ways — were refused edits to existing files under
@@ -332,7 +335,7 @@ jobs:
           for d in j.get("permission_denials") or []:
               i = d.get("tool_input") or {}
               lines.append(f"- {d.get('tool_name')}: `{i.get('file_path') or i.get('command') or i.get('path') or ''}`")
-          open(sys.argv[3], "w").write("\n".join(lines))
+          open(sys.argv[3], "w").write("".join(line + "\n" for line in lines))
           PY
           tail -40 "$RUNNER_TEMP/claude.txt"
           if [ -s "$RUNNER_TEMP/denied.md" ]; then
@@ -382,6 +385,32 @@ jobs:
           for f in "${outside[@]}"; do
             if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then git checkout -- "$f"; else rm -rf -- "$f"; fi
           done
+
+      - name: Format the drafted tests
+        if: steps.configured.outputs.go == 'true' && steps.before.outputs.missed != '0'
+        run: |
+          # The proof run on cobenian-logs (16 Sep) drafted real tests, used every turn before running
+          # `mix format`, and the week was refused on formatting alone. Layout is not something the model
+          # should spend turns on or lose a week over, so the formatter is applied here, to the test files
+          # the draft changed and nothing else. The check in the next step still runs.
+          set +e
+          [ -n "$FIX_FORMAT" ] || { echo "No formatter to apply."; exit 0; }
+          read -r -a globs <<< "$TESTS_DIRS"
+          files=()
+          while IFS= read -r line; do
+            f="${line:3}"
+            [ -f "$f" ] || continue
+            case "$f" in *.ex|*.exs) ;; *) continue ;; esac
+            for g in "${globs[@]}"; do [[ "$f" == $g/* ]] && { files+=("$f"); break; }; done
+          done < <(git status --porcelain --untracked-files=all)
+          if [ "${#files[@]}" = 0 ]; then echo "No drafted test files to format."; exit 0; fi
+          printf 'Formatting %s\n' "${files[@]}"
+          if bash -c "$FIX_FORMAT \"\$@\"" _ "${files[@]}"; then
+            echo "Formatted ${#files[@]} drafted test file(s) with \`$FIX_FORMAT\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=The drafted tests could not be formatted::\`$FIX_FORMAT\` failed; the formatting check will say why."
+          fi
+          exit 0
 
       - name: Full suite and formatting
         id: suite
