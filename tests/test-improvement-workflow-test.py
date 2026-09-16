@@ -14,7 +14,7 @@ A ~$45/day API bill had just been traced to model calls nobody could see, so a r
 see ANTHROPIC_API_KEY but not the token must FAIL rather than quietly fall back to billing the API,
 and the API key must never reach the model step at all.
 """
-import os, pathlib, re, shutil, subprocess, sys, tempfile
+import json, os, pathlib, re, shutil, subprocess, sys, tempfile
 
 import yaml
 
@@ -123,12 +123,57 @@ m = run("mutation.yml", {"LANGUAGE": "python"}, files=PATHS)
 expect("both jobs hand the tool the same arguments, so Tuesday's sample is Monday's",
        bool(ti_python_args) and m["sample_args_raw"] == ti_python_args, (m["sample_args_raw"], ti_python_args))
 
+# WRITES STAY IN THE TESTS (2026-09-16). A run on cobenian-logs left production code modified and the
+# week measured nothing. A step after drafting discards anything outside the test directories; path-scoped
+# Edit rules were tried and refused every edit, so the step is the boundary, exercised with the shell that ships.
+print("keeping to the tests")
+def tools(r):
+    m = re.search(r"^ALLOWED_TOOLS=(.*)$", r["env"], re.M)
+    return m.group(1).split(",") if m else []
+key = {"CLAUDE_CODE_OAUTH_TOKEN": "present"}
+for lang, extra, dirs in (("elixir", {}, ["test"]), ("elixir", {"UMBRELLA": "true"}, ["apps/*/test"]), ("python", {}, ["tests"])):
+    r = run("test-improvement.yml", {"LANGUAGE": lang, **extra, **key, "GITHUB_WORKSPACE": "/work"}, files=PATHS)
+    t = tools(r)
+    expect(f"{lang}{' umbrella' if extra else ''}: file tools are not path-scoped (the keep step is the boundary)",
+           "Write" in t and "Edit" in t and not any(x.startswith(("Edit(", "Write(")) for x in t), t)
+
+keep = step("test-improvement.yml", "Keep only test changes")
+def keep_run(tests_dirs, base, change):
+    d = pathlib.Path(tempfile.mkdtemp())
+    try:
+        repo = d / "repo"; repo.mkdir()
+        git = lambda *a: subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True)
+        git("init", "-q")
+        for path, text in base.items():
+            (repo / path).parent.mkdir(parents=True, exist_ok=True); (repo / path).write_text(text)
+        git("add", "-A"); git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base")
+        for path, text in change.items():
+            (repo / path).parent.mkdir(parents=True, exist_ok=True); (repo / path).write_text(text)
+        (d / "summary").write_text("")
+        p = subprocess.run([BASH, "--noprofile", "--norc", "-eo", "pipefail", "-c", keep], cwd=repo,
+                           env={"PATH": os.environ["PATH"], "TESTS_DIRS": tests_dirs, "GITHUB_STEP_SUMMARY": str(d / "summary")},
+                           capture_output=True, text=True)
+        status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=repo, capture_output=True, text=True).stdout
+        return p.returncode, status, (d / "summary").read_text()
+    finally:
+        shutil.rmtree(d)
+base = {"lib/app.ex": "prod\n", "test/app_test.exs": "test\n"}
+code, status, summary = keep_run("test", base, {"test/app_test.exs": "test\nmore\n", "test/new_test.exs": "new\n"})
+expect("a draft that changed only tests keeps every change", code == 0 and "test/app_test.exs" in status and "test/new_test.exs" in status and summary == "", (code, status, summary))
+code, status, summary = keep_run("test", base, {"lib/app.ex": "prod\nedited\n", "lib/stray.ex": "x\n", "test/app_test.exs": "test\nmore\n"})
+expect("a production edit and a stray file are discarded, the test change kept, and both named",
+       code == 0 and "lib/" not in status and "test/app_test.exs" in status and "lib/app.ex" in summary and "lib/stray.ex" in summary, (code, status, summary))
+ubase = {"apps/core/lib/core.ex": "prod\n", "apps/core/test/core_test.exs": "test\n"}
+code, status, summary = keep_run("apps/*/test", ubase, {"apps/core/lib/core.ex": "edited\n", "apps/core/test/core_test.exs": "more\n"})
+expect("an umbrella keeps its app's test change and discards the app's production edit",
+       code == 0 and "apps/core/lib" not in status and "apps/core/test/core_test.exs" in status, (code, status, summary))
+
 # The end of the drafting step, run under the shell Actions uses (`bash -e -o pipefail`) with a stub
 # `claude`. The exit code must be recorded rather than killing the step, an authentication error must
 # fail loudly, and a successful draft that merely mentions a token must not be mistaken for one.
 print("drafting step")
 tail = draft[draft.index("claude -p"):]
-def draft_run(rc, out):
+def draft_run(rc, out, want_output=False):
     t = pathlib.Path(tempfile.mkdtemp())
     try:
         stub = t / "stub"; stub.mkdir()
@@ -137,17 +182,36 @@ def draft_run(rc, out):
         env = {"PATH": f"{stub}:{os.environ['PATH']}", "RUNNER_TEMP": str(t), "GITHUB_STEP_SUMMARY": str(t / "summary"),
                "MODEL": "m", "MAX_TURNS": "1", "ALLOWED_TOOLS": "Read"}
         p = subprocess.run([BASH, "--noprofile", "--norc", "-eo", "pipefail", "-c", tail], env=env, capture_output=True, text=True)
-        return p.returncode, (t / "summary").read_text()
+        return p.returncode, (t / "summary").read_text() + (p.stdout if want_output else "")
     finally:
         shutil.rmtree(t)
-code, summary = draft_run(0, "Added tests for the OAuth token refresh path")
+def result(text, is_error=False, denials=(), subtype="success"):
+    return json.dumps({"type": "result", "subtype": subtype, "is_error": is_error, "result": text, "permission_denials": list(denials)})
+code, summary = draft_run(0, result("Added tests for the OAuth token refresh path"))
 expect("a successful draft that mentions an OAuth token is not failed", code == 0 and "exited 0" in summary, (code, summary))
-code, summary = draft_run(1, "Error: reached max turns")
+code, summary = draft_run(1, result("", is_error=True, subtype="error_max_turns"))
+expect("a run that used every turn says so, with the limit", code == 0 and "error_max_turns" in summary and "all 1 turns" in summary, (code, summary))
 expect("a non-zero exit without an auth error is recorded, and the verifier still decides",
        code == 0 and "exited 1" in summary, (code, summary))
 code, summary = draft_run(1, 'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid bearer token"}}')
 expect("an authentication error fails the step and says which secret to check",
        code == 1 and "could not authenticate" in summary and "CLAUDE_CODE_OAUTH_TOKEN" in summary, (code, summary))
+code, summary = draft_run(0, "Not logged in · Please run /login")
+expect("output that is not JSON is kept as it came, so a CLI error is still recognised",
+       code == 0 and "exited 0" in summary and "could not authenticate" not in summary, (code, summary))
+code, summary = draft_run(1, "Not logged in · Please run /login")
+expect("plain-text authentication output with a failing exit still fails loudly", code == 1 and "could not authenticate" in summary, (code, summary))
+code, summary = draft_run(0, result("Not logged in · Please run /login", is_error=True))
+expect("a result marked as an error that says it is not logged in fails even when the exit code is 0",
+       code == 1 and "could not authenticate" in summary, (code, summary))
+code, output = draft_run(0, result("x", denials=[{"tool_name": "Bash", "tool_input": {"command": "find /"}}] * 3), want_output=True)
+expect("the refusal count matches the refusals listed", "3 refused" in output, output)
+code, summary = draft_run(0, result("The edit needs your approval", denials=[
+    {"tool_name": "Edit", "tool_input": {"file_path": "/w/test/a_test.exs"}}]))
+expect("a refused edit is named in the summary with its file, and the step still records the exit",
+       code == 0 and "refused" in summary and "Edit: `/w/test/a_test.exs`" in summary, (code, summary))
+code, summary = draft_run(0, result("Added two tests"))
+expect("a draft nobody refused says nothing about refusals", code == 0 and "refused" not in summary, (code, summary))
 
 # The arguments file is read back with `mapfile -t` in the Sample steps; the tool must accept it.
 d = pathlib.Path(tempfile.mkdtemp())

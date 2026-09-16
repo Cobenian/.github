@@ -180,6 +180,10 @@ jobs:
             echo "RUN_TESTS=${TEST_COMMAND:-$test_default}"
             echo "RUN_FORMAT=${FORMAT_COMMAND:-$format_default}"
             echo "RUN_SETUP=${SETUP_COMMAND:-$setup_default}"
+            # The model's file tools are NOT limited by path. Proof runs on cobenian-logs (16 Sep) with
+            # Edit(test/**) — and with it spelled three ways — were refused edits to existing files under
+            # test/ and drafted nothing. The boundary is the "Keep only test changes" step after drafting,
+            # which discards anything outside the test directories before anything is measured.
             echo "ALLOWED_TOOLS=$tools_default"
           } >> "$GITHUB_ENV"
 
@@ -311,20 +315,73 @@ jobs:
           PY
           claude -p "$(cat "$RUNNER_TEMP/prompt.md")" \
             --model "$MODEL" --max-turns "$MAX_TURNS" \
-            --allowedTools "$ALLOWED_TOOLS" \
-            > "$RUNNER_TEMP/claude.txt" 2>&1 && rc=0 || rc=$?
+            --allowedTools "$ALLOWED_TOOLS" --output-format json \
+            > "$RUNNER_TEMP/claude.json" 2>&1 && rc=0 || rc=$?
+          # The JSON result carries the calls the permission rules refused. Without it a blocked edit
+          # shows only as the model asking for approval nobody can give, and a week that drafts nothing.
+          # Output that is not JSON (a crash, a CLI error) is kept as it came.
+          python3 - "$RUNNER_TEMP/claude.json" "$RUNNER_TEMP/claude.txt" "$RUNNER_TEMP/denied.md" <<'PY'
+          import json, sys
+          raw = open(sys.argv[1]).read()
+          try:
+              j = json.loads(raw)
+          except ValueError:
+              open(sys.argv[2], "w").write(raw); open(sys.argv[3], "w").write(""); sys.exit(0)
+          open(sys.argv[2], "w").write(str(j.get("result") or "") + (f"\n[is_error: {j.get('subtype')}]\n" if j.get("is_error") else "\n"))
+          lines = []
+          for d in j.get("permission_denials") or []:
+              i = d.get("tool_input") or {}
+              lines.append(f"- {d.get('tool_name')}: `{i.get('file_path') or i.get('command') or i.get('path') or ''}`")
+          open(sys.argv[3], "w").write("\n".join(lines))
+          PY
           tail -40 "$RUNNER_TEMP/claude.txt"
+          if [ -s "$RUNNER_TEMP/denied.md" ]; then
+            echo "::warning title=Claude Code was refused some tool calls::$(grep -c '^- ' "$RUNNER_TEMP/denied.md") refused; see the summary."
+            cat "$RUNNER_TEMP/denied.md"
+          fi
           # Not a failure of this step: a model that stops at its turn limit has still drafted, and
           # the verifier decides. But the exit code is recorded where a person reads, because the
           # way a bad credential shows up here is a quiet "nothing proposable" a step later.
           { echo "### Drafting"; echo; echo "Credential handed to Claude Code: \`CLAUDE_CODE_OAUTH_TOKEN\` (the subscription). No API key was in its environment."; echo; echo "Claude Code exited $rc."; } >> "$GITHUB_STEP_SUMMARY"
-          # Only when it exited non-zero: a successful draft of tests for an OAuth flow may well say
+          # Why it stopped, when it stopped on an error: error_max_turns means the turn limit ran out
+          # before it finished, which reads the same as "nothing proposable" unless it is said here.
+          stopped=$(sed -n 's/^\[is_error: \(.*\)\]$/\1/p' "$RUNNER_TEMP/claude.txt" | tail -1)
+          if [ -n "$stopped" ]; then
+            echo "::warning title=Claude Code stopped on an error::$stopped"
+            { echo; echo "Claude Code stopped on an error: \`$stopped\`$( [ "$stopped" = error_max_turns ] && echo " (it used all $MAX_TURNS turns)")."; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -s "$RUNNER_TEMP/denied.md" ]; then
+            { echo; echo "Tool calls the permission rules refused (the model could not do these):"; echo; cat "$RUNNER_TEMP/denied.md"; echo; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # Only when it failed (a non-zero exit, or a result marked as an error): a successful draft of tests for an OAuth flow may well say
           # "token" in its own words, and must not be failed for it.
-          if [ "$rc" != 0 ] && grep -qiE 'authentication_error|invalid api key|invalid bearer token|oauth token has expired|please run /login|not logged in' "$RUNNER_TEMP/claude.txt"; then
+          if { [ "$rc" != 0 ] || grep -q '^\[is_error' "$RUNNER_TEMP/claude.txt"; } && grep -qiE 'authentication_error|invalid api key|invalid bearer token|oauth token has expired|please run /login|not logged in' "$RUNNER_TEMP/claude.txt"; then
             echo "::error title=Claude Code could not authenticate::See the drafting output above. Check CLAUDE_CODE_OAUTH_TOKEN (claude setup-token)."
             echo "**Claude Code could not authenticate.** Check \`CLAUDE_CODE_OAUTH_TOKEN\`." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+
+      - name: Keep only test changes
+        if: steps.configured.outputs.go == 'true' && steps.before.outputs.missed != '0'
+        run: |
+          # A BACKSTOP for the tool limits above. Anything the draft changed outside the test
+          # directories — a production file, a formatter's reach, a stray file — is shown here and
+          # then discarded, so the week is measured on its test changes rather than refused.
+          read -r -a globs <<< "$TESTS_DIRS"
+          outside=()
+          while IFS= read -r line; do
+            f="${line:3}"
+            inside=false
+            for g in "${globs[@]}"; do [[ "$f" == $g/* ]] && inside=true; done
+            [ "$inside" = false ] && outside+=("$f")
+          done < <(git status --porcelain --untracked-files=all)
+          if [ "${#outside[@]}" = 0 ]; then echo "Only test files changed."; exit 0; fi
+          echo "::warning title=Changes outside the tests were discarded::${outside[*]}"
+          git --no-pager diff -- "${outside[@]}" | head -200 || true
+          { echo "### Discarded changes outside the tests"; echo; printf -- '- `%s`\n' "${outside[@]}"; } >> "$GITHUB_STEP_SUMMARY"
+          for f in "${outside[@]}"; do
+            if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then git checkout -- "$f"; else rm -rf -- "$f"; fi
+          done
 
       - name: Full suite and formatting
         id: suite
