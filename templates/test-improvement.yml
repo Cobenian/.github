@@ -1,8 +1,8 @@
 # Weekly unit test improvement: a model drafts tests that catch the deliberate bugs Monday's
 # mutation sample says the tests miss; a mechanical verifier decides whether a pull request may be
-# opened, and a person reviews it. Needs the ANTHROPIC_API_KEY secret (org secret, shared with this
-# repository); without it the run FAILS with "not configured" rather than passing having done
-# nothing. Copy to .github/workflows/test-improvement.yml. See Cobenian/.github
+# opened, and a person reviews it. Needs the CLAUDE_CODE_OAUTH_TOKEN secret (from `claude setup-token`;
+# org secret, shared with this repository) — it runs on the Claude subscription, never the API key.
+# Without it the run FAILS with "not configured" rather than passing having done nothing. Copy to .github/workflows/test-improvement.yml. See Cobenian/.github
 # .github/workflows/test-improvement.yml for every input.
 name: Unit test improvement
 
