@@ -168,6 +168,61 @@ code, status, summary = keep_run("apps/*/test", ubase, {"apps/core/lib/core.ex":
 expect("an umbrella keeps its app's test change and discards the app's production edit",
        code == 0 and "apps/core/lib" not in status and "apps/core/test/core_test.exs" in status, (code, status, summary))
 
+# FORMATTING IS APPLIED, NOT ONLY CHECKED (2026-09-16). A proof run drafted real tests, ran out of turns
+# before `mix format`, and the week was refused on layout. The formatter runs on the drafted test files
+# only; a stub `mix` records what it was handed.
+print("formatting the drafted tests")
+for lang, extra, want in (("elixir", {}, "mix format"), ("python", {}, ""), ("elixir", {"FORMAT_COMMAND": "mix format --check-formatted --dry-run"}, "")):
+    r = run("test-improvement.yml", {"LANGUAGE": lang, **extra, **key}, files=PATHS)
+    m = re.search(r"^FIX_FORMAT=(.*)$", r["env"], re.M)
+    expect(f"{lang}{' with its own format_command' if extra else ''}: the formatter applied is {want!r}",
+           m is not None and m.group(1) == want, r["env"])
+fmt = step("test-improvement.yml", "Format the drafted tests")
+def fmt_run(tests_dirs, fix, base, change, delete=(), mix_rc=0):
+    d = pathlib.Path(tempfile.mkdtemp())
+    try:
+        repo, stub = d / "repo", d / "stub"; repo.mkdir(); stub.mkdir()
+        (stub / "mix").write_text(f'#!/bin/sh\nfor a in "$@"; do echo "$a"; done >> "{d}/args"\nexit {mix_rc}\n'); (stub / "mix").chmod(0o755)
+        git = lambda *a: subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True)
+        git("init", "-q")
+        for path, text in base.items():
+            (repo / path).parent.mkdir(parents=True, exist_ok=True); (repo / path).write_text(text)
+        git("add", "-A"); git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base")
+        for path, text in change.items():
+            (repo / path).parent.mkdir(parents=True, exist_ok=True); (repo / path).write_text(text)
+        for path in delete:
+            (repo / path).unlink()
+        (d / "summary").write_text("")
+        p = subprocess.run([BASH, "--noprofile", "--norc", "-e", "-c", fmt], cwd=repo,
+                           env={"PATH": f"{stub}:{os.environ['PATH']}", "TESTS_DIRS": tests_dirs, "FIX_FORMAT": fix,
+                                "GITHUB_STEP_SUMMARY": str(d / "summary")}, capture_output=True, text=True)
+        args = (d / "args").read_text().split("\n")[:-1] if (d / "args").exists() else None
+        return p.returncode, args, (d / "summary").read_text(), p.stdout
+    finally:
+        shutil.rmtree(d)
+fbase = {"lib/app.ex": "prod\n", "test/app_test.exs": "t\n", "test/gone_test.exs": "t\n", "test/support/data.json": "{}\n"}
+code, args, summary, out = fmt_run("test", "mix format", fbase,
+    {"test/app_test.exs": "t\nmore\n", "test/new_test.exs": "n\n", "test/support/new_helper.ex": "h\n",
+     "test/support/data.json": "{ }\n", "lib/app.ex": "edited\n"}, delete=["test/gone_test.exs"])
+expect("the formatter is handed exactly the changed and new Elixir files under the tests",
+       code == 0 and args is not None and args[0] == "format"
+       and sorted(args[1:]) == ["test/app_test.exs", "test/new_test.exs", "test/support/new_helper.ex"]
+       and "Formatted 3" in summary, (code, args, summary, out))
+code, args, summary, out = fmt_run("apps/*/test", "mix format", {"apps/core/lib/core.ex": "p\n", "apps/core/test/core_test.exs": "t\n"},
+    {"apps/core/lib/core.ex": "e\n", "apps/core/test/core_test.exs": "t\nmore\n"})
+expect("an umbrella formats its app's drafted test and not the app's code",
+       code == 0 and args == ["format", "apps/core/test/core_test.exs"], (code, args, out))
+code, args, summary, out = fmt_run("test", "", fbase, {"test/app_test.exs": "t\nmore\n"})
+expect("no formatter configured runs nothing and succeeds", code == 0 and args is None and summary == "", (code, args, out))
+code, args, summary, out = fmt_run("test", "mix format", fbase, {"lib/app.ex": "edited\n"})
+expect("no drafted test files runs nothing", code == 0 and args is None, (code, args, out))
+code, args, summary, out = fmt_run("test", "mix format", fbase, {"test/app_test.exs": "t\nmore\n"}, mix_rc=1)
+expect("a formatter that fails (a syntax error) warns and leaves the verdict to the check",
+       code == 0 and "could not be formatted" in out and summary == "", (code, args, summary, out))
+text = (ROOT / ".github" / "workflows" / "test-improvement.yml").read_text()
+expect("formatting comes after the keep step and before the check",
+       text.index("name: Keep only test changes") < text.index("name: Format the drafted tests") < text.index("name: Full suite and formatting"))
+
 # The end of the drafting step, run under the shell Actions uses (`bash -e -o pipefail`) with a stub
 # `claude`. The exit code must be recorded rather than killing the step, an authentication error must
 # fail loudly, and a successful draft that merely mentions a token must not be mistaken for one.
@@ -206,6 +261,9 @@ expect("a result marked as an error that says it is not logged in fails even whe
        code == 1 and "could not authenticate" in summary, (code, summary))
 code, output = draft_run(0, result("x", denials=[{"tool_name": "Bash", "tool_input": {"command": "find /"}}] * 3), want_output=True)
 expect("the refusal count matches the refusals listed", "3 refused" in output, output)
+code, output = draft_run(1, result("", is_error=True, subtype="error_max_turns", denials=[{"tool_name": "Bash", "tool_input": {"command": "find /"}}]), want_output=True)
+expect("the last refusal and the stopped-on-an-error warning are separate lines",
+       re.search(r"^::warning title=Claude Code stopped on an error::error_max_turns$", output, re.M) is not None, output)
 code, summary = draft_run(0, result("The edit needs your approval", denials=[
     {"tool_name": "Edit", "tool_input": {"file_path": "/w/test/a_test.exs"}}]))
 expect("a refused edit is named in the summary with its file, and the step still records the exit",
