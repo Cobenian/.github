@@ -14,7 +14,7 @@ A ~$45/day API bill had just been traced to model calls nobody could see, so a r
 see ANTHROPIC_API_KEY but not the token must FAIL rather than quietly fall back to billing the API,
 and the API key must never reach the model step at all.
 """
-import os, pathlib, re, shutil, subprocess, sys, tempfile
+import json, os, pathlib, re, shutil, subprocess, sys, tempfile
 
 import yaml
 
@@ -132,10 +132,10 @@ def tools(r):
     return m.group(1).split(",") if m else []
 key = {"CLAUDE_CODE_OAUTH_TOKEN": "present"}
 for lang, extra, dirs in (("elixir", {}, ["test"]), ("elixir", {"UMBRELLA": "true"}, ["apps/*/test"]), ("python", {}, ["tests"])):
-    r = run("test-improvement.yml", {"LANGUAGE": lang, **extra, **key}, files=PATHS)
+    r = run("test-improvement.yml", {"LANGUAGE": lang, **extra, **key, "GITHUB_WORKSPACE": "/work"}, files=PATHS)
     t = tools(r)
     expect(f"{lang}{' umbrella' if extra else ''}: file edits are allowed only under {dirs}",
-           [x for x in t if x.startswith("Edit(")] == [f"Edit({d}/**)" for d in dirs]
+           [x for x in t if x.startswith("Edit(")] == [e for d in dirs for e in (f"Edit({d}/**)", f"Edit(/{d}/**)", f"Edit(//work/{d}/**)")]
            and "Write" not in t and "Edit" not in t and not any(x.startswith("Write(") for x in t), t)
 
 keep = step("test-improvement.yml", "Keep only test changes")
@@ -186,14 +186,30 @@ def draft_run(rc, out):
         return p.returncode, (t / "summary").read_text()
     finally:
         shutil.rmtree(t)
-code, summary = draft_run(0, "Added tests for the OAuth token refresh path")
+def result(text, is_error=False, denials=(), subtype="success"):
+    return json.dumps({"type": "result", "subtype": subtype, "is_error": is_error, "result": text, "permission_denials": list(denials)})
+code, summary = draft_run(0, result("Added tests for the OAuth token refresh path"))
 expect("a successful draft that mentions an OAuth token is not failed", code == 0 and "exited 0" in summary, (code, summary))
-code, summary = draft_run(1, "Error: reached max turns")
+code, summary = draft_run(1, result("", is_error=True, subtype="error_max_turns"))
 expect("a non-zero exit without an auth error is recorded, and the verifier still decides",
        code == 0 and "exited 1" in summary, (code, summary))
 code, summary = draft_run(1, 'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid bearer token"}}')
 expect("an authentication error fails the step and says which secret to check",
        code == 1 and "could not authenticate" in summary and "CLAUDE_CODE_OAUTH_TOKEN" in summary, (code, summary))
+code, summary = draft_run(0, "Not logged in · Please run /login")
+expect("output that is not JSON is kept as it came, so a CLI error is still recognised",
+       code == 0 and "exited 0" in summary and "could not authenticate" not in summary, (code, summary))
+code, summary = draft_run(1, "Not logged in · Please run /login")
+expect("plain-text authentication output with a failing exit still fails loudly", code == 1 and "could not authenticate" in summary, (code, summary))
+code, summary = draft_run(0, result("Not logged in · Please run /login", is_error=True))
+expect("a result marked as an error that says it is not logged in fails even when the exit code is 0",
+       code == 1 and "could not authenticate" in summary, (code, summary))
+code, summary = draft_run(0, result("The edit needs your approval", denials=[
+    {"tool_name": "Edit", "tool_input": {"file_path": "/w/test/a_test.exs"}}]))
+expect("a refused edit is named in the summary with its file, and the step still records the exit",
+       code == 0 and "refused" in summary and "Edit: `/w/test/a_test.exs`" in summary, (code, summary))
+code, summary = draft_run(0, result("Added two tests"))
+expect("a draft nobody refused says nothing about refusals", code == 0 and "refused" not in summary, (code, summary))
 
 # The arguments file is read back with `mapfile -t` in the Sample steps; the tool must accept it.
 d = pathlib.Path(tempfile.mkdtemp())
