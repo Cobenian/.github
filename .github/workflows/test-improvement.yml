@@ -180,21 +180,11 @@ jobs:
             echo "RUN_TESTS=${TEST_COMMAND:-$test_default}"
             echo "RUN_FORMAT=${FORMAT_COMMAND:-$format_default}"
             echo "RUN_SETUP=${SETUP_COMMAND:-$setup_default}"
-            # WRITES ARE LIMITED TO THE TEST DIRECTORIES, not only asked to be. The prompt said
-            # "change files under test only", and a run on cobenian-logs (16 Sep) still left
-            # lib/cobenian_logs/logs.ex modified, so the after-sample refused to measure and the
-            # week drafted nothing. Claude Code checks every file-editing tool, Write included,
-            # against Edit(path) rules only, so one Edit rule per test directory limits them all.
-            # The directories are split without globbing, so `apps/*/test` stays a pattern.
-            # EACH DIRECTORY IS SPELLED THREE WAYS. With only `Edit(test/**)` the proof run on
-            # cobenian-logs (16 Sep) was refused an edit to an existing file under test/ and wrote
-            # nothing. The docs say that spelling matches <cwd>/test; the CLI anchor `/test/**` and the
-            # absolute `//<workspace>/test/**` say the same thing without depending on how the
-            # current directory is resolved. All three stay inside the test directory.
-            scoped=""
-            read -r -a tdirs <<< "$dirs"
-            for t in "${tdirs[@]}"; do scoped="$scoped,Edit($t/**),Edit(/$t/**),Edit(/${GITHUB_WORKSPACE:-$PWD}/$t/**)"; done
-            echo "ALLOWED_TOOLS=${tools_default/Read,Write,Edit,/Read${scoped},}"
+            # The model's file tools are NOT limited by path. Proof runs on cobenian-logs (16 Sep) with
+            # Edit(test/**) — and with it spelled three ways — were refused edits to existing files under
+            # test/ and drafted nothing. The boundary is the "Keep only test changes" step after drafting,
+            # which discards anything outside the test directories before anything is measured.
+            echo "ALLOWED_TOOLS=$tools_default"
           } >> "$GITHUB_ENV"
 
           open=$(gh pr list --label test-improvement --state open --json number --jq 'length')

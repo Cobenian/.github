@@ -124,8 +124,8 @@ expect("both jobs hand the tool the same arguments, so Tuesday's sample is Monda
        bool(ti_python_args) and m["sample_args_raw"] == ti_python_args, (m["sample_args_raw"], ti_python_args))
 
 # WRITES STAY IN THE TESTS (2026-09-16). A run on cobenian-logs left production code modified and the
-# week measured nothing. The model's file tools are limited to the test directories, and a step after
-# drafting discards anything else; both are exercised here with the shell that ships.
+# week measured nothing. A step after drafting discards anything outside the test directories; path-scoped
+# Edit rules were tried and refused every edit, so the step is the boundary, exercised with the shell that ships.
 print("keeping to the tests")
 def tools(r):
     m = re.search(r"^ALLOWED_TOOLS=(.*)$", r["env"], re.M)
@@ -134,9 +134,8 @@ key = {"CLAUDE_CODE_OAUTH_TOKEN": "present"}
 for lang, extra, dirs in (("elixir", {}, ["test"]), ("elixir", {"UMBRELLA": "true"}, ["apps/*/test"]), ("python", {}, ["tests"])):
     r = run("test-improvement.yml", {"LANGUAGE": lang, **extra, **key, "GITHUB_WORKSPACE": "/work"}, files=PATHS)
     t = tools(r)
-    expect(f"{lang}{' umbrella' if extra else ''}: file edits are allowed only under {dirs}",
-           [x for x in t if x.startswith("Edit(")] == [e for d in dirs for e in (f"Edit({d}/**)", f"Edit(/{d}/**)", f"Edit(//work/{d}/**)")]
-           and "Write" not in t and "Edit" not in t and not any(x.startswith("Write(") for x in t), t)
+    expect(f"{lang}{' umbrella' if extra else ''}: file tools are not path-scoped (the keep step is the boundary)",
+           "Write" in t and "Edit" in t and not any(x.startswith(("Edit(", "Write(")) for x in t), t)
 
 keep = step("test-improvement.yml", "Keep only test changes")
 def keep_run(tests_dirs, base, change):
