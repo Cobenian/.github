@@ -18,7 +18,7 @@
 # touches production code, and keeps at most one such pull request open per repository. When they
 # do not, it says why in the run summary and on the mutation-sample issue, and opens nothing.
 #
-# NOTHING IS NOT A PASS. No paths file, an empty one, or no ANTHROPIC_API_KEY secret FAILS the run
+# NOTHING IS NOT A PASS. No paths file, an empty one, or no CLAUDE_CODE_OAUTH_TOKEN secret FAILS the run
 # with "not configured" in the summary, so a job that has never drafted a test cannot sit green
 # (Panel's first run found the key missing and nothing said so but a line in a log). Waiting on an
 # open improvement pull request is a deliberate choice, and succeeds with a summary saying so.
@@ -27,8 +27,16 @@
 # commit this workflow was called at (job.workflow_sha).
 #
 # CREDENTIALS. The repository is checked out without a persisted token, and the model's step gets
-# only ANTHROPIC_API_KEY: the write token is handed to git in the Propose step alone, after the
+# only CLAUDE_CODE_OAUTH_TOKEN: the write token is handed to git in the Propose step alone, after the
 # verifier has passed.
+#
+# THE SUBSCRIPTION, NOT THE API KEY, and deliberately with no fallback. This job is Claude Code
+# drafting tests, which is development work, and it runs on Bryan's Claude plan through a token from
+# `claude setup-token`. It used ANTHROPIC_API_KEY until 2026-09-16, when a ~$45/day API bill was
+# traced to unattended model calls nobody could see. A fallback to the API key would bring back
+# exactly that failure the day the token expired: the job would keep working and quietly start
+# billing again. So a missing token FAILS as not configured, and ANTHROPIC_API_KEY is never handed
+# to the model step, even when the repository can see it.
 #
 # CI DOES NOT START on a pull request opened with GITHUB_TOKEN (GitHub's rule against workflow
 # loops). The pull request body says so; a person closes and reopens it to run CI before review.
@@ -120,7 +128,7 @@ jobs:
       - name: Configured?
         id: configured
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           LANGUAGE: ${{ inputs.language }}
           UMBRELLA: ${{ inputs.umbrella }}
@@ -156,7 +164,7 @@ jobs:
           [ -f "$PATHS_FILE" ] || not_configured "$PATHS_FILE does not exist. List the files to mutate there, one per line, with a comment saying why each matters."
           grep -vE '^[[:space:]]*(#|$)' "$PATHS_FILE" > "$RUNNER_TEMP/paths" || true
           [ -s "$RUNNER_TEMP/paths" ] || not_configured "$PATHS_FILE lists no files."
-          [ -n "$ANTHROPIC_API_KEY" ] || not_configured "The ANTHROPIC_API_KEY secret is not visible to this repository. Add it (an organization secret shared with this repository works) and pass \`secrets: inherit\` from the caller."
+          [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || not_configured "The CLAUDE_CODE_OAUTH_TOKEN secret is not visible to this repository. Create one with \`claude setup-token\`, share it as an organization secret with this repository, and pass \`secrets: inherit\` from the caller. ANTHROPIC_API_KEY is not used as a fallback: this job runs on the Claude subscription, never the API."
 
           dirs="${TESTS_DIR:-$dirs_default}"
           : > "$RUNNER_TEMP/sample-args"; : > "$RUNNER_TEMP/verify-args"
@@ -264,12 +272,15 @@ jobs:
       - name: Draft stronger tests
         if: steps.configured.outputs.go == 'true' && steps.before.outputs.missed != '0'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           MODEL: ${{ inputs.model || vars.TEST_IMPROVEMENT_MODEL || 'claude-sonnet-5' }}
           MAX_TURNS: ${{ inputs.max_turns }}
           LANGUAGE: ${{ inputs.language }}
         run: |
           npm install -g @anthropic-ai/claude-code >/dev/null
+          # An API key in the environment would be used in place of the subscription token and bill
+          # the API. Nothing here sets one; this makes sure nothing inherited can.
+          unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
           python3 - "$RUNNER_TEMP/before.json" > "$RUNNER_TEMP/prompt.md" <<'PY'
           import json, os, sys
           r = json.load(open(sys.argv[1]))
@@ -301,8 +312,19 @@ jobs:
           claude -p "$(cat "$RUNNER_TEMP/prompt.md")" \
             --model "$MODEL" --max-turns "$MAX_TURNS" \
             --allowedTools "$ALLOWED_TOOLS" \
-            > "$RUNNER_TEMP/claude.txt" 2>&1 || true
+            > "$RUNNER_TEMP/claude.txt" 2>&1 && rc=0 || rc=$?
           tail -40 "$RUNNER_TEMP/claude.txt"
+          # Not a failure of this step: a model that stops at its turn limit has still drafted, and
+          # the verifier decides. But the exit code is recorded where a person reads, because the
+          # way a bad credential shows up here is a quiet "nothing proposable" a step later.
+          { echo "### Drafting"; echo; echo "Credential handed to Claude Code: \`CLAUDE_CODE_OAUTH_TOKEN\` (the subscription). No API key was in its environment."; echo; echo "Claude Code exited $rc."; } >> "$GITHUB_STEP_SUMMARY"
+          # Only when it exited non-zero: a successful draft of tests for an OAuth flow may well say
+          # "token" in its own words, and must not be failed for it.
+          if [ "$rc" != 0 ] && grep -qiE 'authentication_error|invalid api key|invalid bearer token|oauth token has expired|please run /login|not logged in' "$RUNNER_TEMP/claude.txt"; then
+            echo "::error title=Claude Code could not authenticate::See the drafting output above. Check CLAUDE_CODE_OAUTH_TOKEN (claude setup-token)."
+            echo "**Claude Code could not authenticate.** Check \`CLAUDE_CODE_OAUTH_TOKEN\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: Full suite and formatting
         id: suite

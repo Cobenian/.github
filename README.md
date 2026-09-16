@@ -102,7 +102,8 @@ Two reusable workflows, one pair of tools, every app (Elixir or Python):
 
 - **Tools live here only** (`tools/mutation-sample`, `tools/test-improvement-verify`). The workflows check them out at `job.workflow_sha`, so moving `v1` moves workflow and tools together. Tested by `self-test.yml`.
 - **Per repo:** copy `templates/mutation.yml` and `templates/test-improvement.yml`, set `language` (and `postgres`, `umbrella`), and write `.github/mutation/paths.txt`: 3-10 files where a wrong operator would cost money, leak access or corrupt data, each with a `#` comment saying why.
-- **Not configured is a failure.** No paths file, an empty one, or (for test improvement) no `ANTHROPIC_API_KEY` secret fails the run with "not configured" in the job summary. A green run always did something.
+- **Not configured is a failure.** No paths file, an empty one, or (for test improvement) no `CLAUDE_CODE_OAUTH_TOKEN` secret fails the run with "not configured" in the job summary. A green run always did something.
+- **Test improvement runs on the Claude subscription, never the API.** Claude Code authenticates with `CLAUDE_CODE_OAUTH_TOKEN` (made with `claude setup-token`, an org secret shared with each repository). `ANTHROPIC_API_KEY` is deliberately not a fallback and is removed from the drafting step's environment: a fallback would resume billing the API, unseen, the day the token lapsed.
 - **Model:** `TEST_IMPROVEMENT_MODEL` variable, default `claude-sonnet-5`.
 - A pull request opened by the job does not trigger CI (GitHub will not start workflows for a pull request `GITHUB_TOKEN` opened); close and reopen it to run CI.
 

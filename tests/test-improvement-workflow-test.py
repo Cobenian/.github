@@ -4,10 +4,15 @@
 The scripts are extracted from the workflow YAML and run with the shell GitHub uses, against a
 stubbed `gh`, so a test here exercises the shell that ships rather than a copy that can drift.
 
-WHY. Panel's unit test improvement job ran for the first time with no ANTHROPIC_API_KEY, drafted
+WHY. Panel's unit test improvement job ran for the first time with no model credential, drafted
 nothing, and the only trace was a line in a log. A job that has done nothing must say so and must
 not read as a pass, so every not-configured shape is seen FAILING here, and the configured shapes
 are seen going ahead: a gate that only ever says no is as useless as one that only says yes.
+
+THE SUBSCRIPTION, NEVER THE API KEY (2026-09-16). The job runs Claude Code on CLAUDE_CODE_OAUTH_TOKEN.
+A ~$45/day API bill had just been traced to model calls nobody could see, so a repository that can
+see ANTHROPIC_API_KEY but not the token must FAIL rather than quietly fall back to billing the API,
+and the API key must never reach the model step at all.
 """
 import os, pathlib, re, shutil, subprocess, sys, tempfile
 
@@ -53,7 +58,7 @@ def run(workflow, env, files=None, open_prs="0"):
                 "GITHUB_STEP_SUMMARY": str(tmp / "summary"), "GITHUB_ENV": str(tmp / "env"),
                 "GITHUB_OUTPUT": str(tmp / "output"), "PATHS_FILE": ".github/mutation/paths.txt",
                 "SAMPLE": "25", "UMBRELLA": "false", "TESTS_DIR": "", "TEST_COMMAND": "", "MUTANT_COMMAND": "",
-                "FORMAT_COMMAND": "", "SETUP_COMMAND": "", "ANTHROPIC_API_KEY": "", **env}
+                "FORMAT_COMMAND": "", "SETUP_COMMAND": "", "ANTHROPIC_API_KEY": "", "CLAUDE_CODE_OAUTH_TOKEN": "", **env}
         p = subprocess.run([BASH, "--noprofile", "--norc", "-eo", "pipefail", str(script)], cwd=work,
                            env=full, capture_output=True, text=True)
         read = lambda n: (tmp / n).read_text() if (tmp / n).exists() else ""
@@ -69,7 +74,7 @@ PATHS = {".github/mutation/paths.txt": "# why this file matters\nlib/app/billing
 
 for wf in ("test-improvement.yml", "mutation.yml"):
     print(wf)
-    key = {"ANTHROPIC_API_KEY": "present"}
+    key = {"CLAUDE_CODE_OAUTH_TOKEN": "present"}
     r = run(wf, {"LANGUAGE": "elixir", **key})
     expect("no paths file FAILS, and the summary says not configured",
            r["code"] == 1 and "not configured" in r["summary"] and "does not exist" in r["summary"], r)
@@ -94,21 +99,55 @@ for wf in ("test-improvement.yml", "mutation.yml"):
 
 print("test-improvement.yml only")
 r = run("test-improvement.yml", {"LANGUAGE": "elixir"}, files=PATHS)
-expect("no ANTHROPIC_API_KEY FAILS, and says which secret", r["code"] == 1 and "ANTHROPIC_API_KEY" in r["summary"]
-       and "not configured" in r["summary"], r)
-r = run("test-improvement.yml", {"LANGUAGE": "elixir", "ANTHROPIC_API_KEY": "present"}, files=PATHS, open_prs="1")
+expect("no CLAUDE_CODE_OAUTH_TOKEN FAILS, and says which secret",
+       r["code"] == 1 and "CLAUDE_CODE_OAUTH_TOKEN" in r["summary"] and "not configured" in r["summary"], r)
+r = run("test-improvement.yml", {"LANGUAGE": "elixir", "ANTHROPIC_API_KEY": "present"}, files=PATHS)
+expect("an API key is NOT a fallback: with only ANTHROPIC_API_KEY it still fails as not configured",
+       r["code"] == 1 and "CLAUDE_CODE_OAUTH_TOKEN" in r["summary"] and "go=true" not in r["output"], r)
+wf_text = (ROOT / ".github" / "workflows" / "test-improvement.yml").read_text()
+expect("no step is handed secrets.ANTHROPIC_API_KEY", "secrets.ANTHROPIC_API_KEY" not in wf_text)
+draft = step("test-improvement.yml", "Draft stronger tests")
+expect("the drafting step removes any inherited API key before Claude Code starts",
+       "unset ANTHROPIC_API_KEY" in draft and draft.index("unset ANTHROPIC_API_KEY") < draft.index("claude -p"))
+r = run("test-improvement.yml", {"LANGUAGE": "elixir", "CLAUDE_CODE_OAUTH_TOKEN": "present"}, files=PATHS, open_prs="1")
 expect("an open improvement pull request waits, succeeds, and says so",
        r["code"] == 0 and "go=false" in r["output"] and "waiting" in r["summary"], r)
-r = run("test-improvement.yml", {"LANGUAGE": "elixir", "ANTHROPIC_API_KEY": "present"}, files=PATHS)
+r = run("test-improvement.yml", {"LANGUAGE": "elixir", "CLAUDE_CODE_OAUTH_TOKEN": "present"}, files=PATHS)
 expect("configured with no open pull request goes ahead", r["code"] == 0 and "go=true" in r["output"], r)
 expect("the verifier is told the same tests directories", r["verify"][:2] == ["--tests-dir", "test"], r["verify"])
 expect("elixir checks formatting", "RUN_FORMAT=mix format --check-formatted" in r["env"], r["env"])
-r = run("test-improvement.yml", {"LANGUAGE": "python", "ANTHROPIC_API_KEY": "present"}, files=PATHS)
+r = run("test-improvement.yml", {"LANGUAGE": "python", "CLAUDE_CODE_OAUTH_TOKEN": "present"}, files=PATHS)
 expect("python has no formatter to check, and says the full suite is every script",
        re.search(r"^RUN_FORMAT=$", r["env"], re.M) is not None and "tests/*.py" in r["env"], r["env"])
 m = run("mutation.yml", {"LANGUAGE": "python"}, files=PATHS)
 expect("both jobs hand the tool the same arguments, so Tuesday's sample is Monday's",
        bool(ti_python_args) and m["sample_args_raw"] == ti_python_args, (m["sample_args_raw"], ti_python_args))
+
+# The end of the drafting step, run under the shell Actions uses (`bash -e -o pipefail`) with a stub
+# `claude`. The exit code must be recorded rather than killing the step, an authentication error must
+# fail loudly, and a successful draft that merely mentions a token must not be mistaken for one.
+print("drafting step")
+tail = draft[draft.index("claude -p"):]
+def draft_run(rc, out):
+    t = pathlib.Path(tempfile.mkdtemp())
+    try:
+        stub = t / "stub"; stub.mkdir()
+        (stub / "claude").write_text(f"#!/bin/sh\necho '{out}'\nexit {rc}\n"); (stub / "claude").chmod(0o755)
+        (t / "prompt.md").write_text("x"); (t / "summary").write_text("")
+        env = {"PATH": f"{stub}:{os.environ['PATH']}", "RUNNER_TEMP": str(t), "GITHUB_STEP_SUMMARY": str(t / "summary"),
+               "MODEL": "m", "MAX_TURNS": "1", "ALLOWED_TOOLS": "Read"}
+        p = subprocess.run([BASH, "--noprofile", "--norc", "-eo", "pipefail", "-c", tail], env=env, capture_output=True, text=True)
+        return p.returncode, (t / "summary").read_text()
+    finally:
+        shutil.rmtree(t)
+code, summary = draft_run(0, "Added tests for the OAuth token refresh path")
+expect("a successful draft that mentions an OAuth token is not failed", code == 0 and "exited 0" in summary, (code, summary))
+code, summary = draft_run(1, "Error: reached max turns")
+expect("a non-zero exit without an auth error is recorded, and the verifier still decides",
+       code == 0 and "exited 1" in summary, (code, summary))
+code, summary = draft_run(1, 'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid bearer token"}}')
+expect("an authentication error fails the step and says which secret to check",
+       code == 1 and "could not authenticate" in summary and "CLAUDE_CODE_OAUTH_TOKEN" in summary, (code, summary))
 
 # The arguments file is read back with `mapfile -t` in the Sample steps; the tool must accept it.
 d = pathlib.Path(tempfile.mkdtemp())
