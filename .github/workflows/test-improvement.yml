@@ -180,7 +180,13 @@ jobs:
             echo "RUN_TESTS=${TEST_COMMAND:-$test_default}"
             echo "RUN_FORMAT=${FORMAT_COMMAND:-$format_default}"
             echo "RUN_SETUP=${SETUP_COMMAND:-$setup_default}"
-            echo "ALLOWED_TOOLS=$tools_default"
+            # WRITES ARE LIMITED TO THE TEST DIRECTORIES, not only asked to be. The prompt said
+            # "change files under test only", and a run on cobenian-logs (16 Sep) still left
+            # lib/cobenian_logs/logs.ex modified, so the after-sample refused to measure and the
+            # week drafted nothing. Write and Edit are granted per test directory instead.
+            scoped=""
+            for t in $dirs; do scoped="$scoped,Write($t/**),Edit($t/**)"; done
+            echo "ALLOWED_TOOLS=${tools_default/Read,Write,Edit,/Read${scoped},}"
           } >> "$GITHUB_ENV"
 
           open=$(gh pr list --label test-improvement --state open --json number --jq 'length')
@@ -325,6 +331,28 @@ jobs:
             echo "**Claude Code could not authenticate.** Check \`CLAUDE_CODE_OAUTH_TOKEN\`." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+
+      - name: Keep only test changes
+        if: steps.configured.outputs.go == 'true' && steps.before.outputs.missed != '0'
+        run: |
+          # A BACKSTOP for the tool limits above. Anything the draft changed outside the test
+          # directories — a production file, a formatter's reach, a stray file — is shown here and
+          # then discarded, so the week is measured on its test changes rather than refused.
+          read -r -a globs <<< "$TESTS_DIRS"
+          outside=()
+          while IFS= read -r line; do
+            f="${line:3}"
+            inside=false
+            for g in "${globs[@]}"; do [[ "$f" == $g/* ]] && inside=true; done
+            [ "$inside" = false ] && outside+=("$f")
+          done < <(git status --porcelain --untracked-files=all)
+          if [ "${#outside[@]}" = 0 ]; then echo "Only test files changed."; exit 0; fi
+          echo "::warning title=Changes outside the tests were discarded::${outside[*]}"
+          git --no-pager diff -- "${outside[@]}" | head -200 || true
+          { echo "### Discarded changes outside the tests"; echo; printf -- '- `%s`\n' "${outside[@]}"; } >> "$GITHUB_STEP_SUMMARY"
+          for f in "${outside[@]}"; do
+            if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then git checkout -- "$f"; else rm -rf -- "$f"; fi
+          done
 
       - name: Full suite and formatting
         id: suite
