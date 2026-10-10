@@ -450,9 +450,15 @@ jobs:
       # and nothing is ignored, which is the same fail-closed direction.
       #
       # RETIREMENTS ARE NOT IGNORABLE here: HEX_IGNORE_RETIREMENTS is never set and is
-      # unset in the gate. And `hex: [ignore_advisories: / ignore_retirements:]` in mix.exs
-      # is refused below, because Hex honours it with no expiry and no reason -- it would
-      # be an unexpiring side door around everything this step enforces.
+      # unset in the gate.
+      #
+      # `hex: [ignore_advisories: / ignore_retirements:]` in mix.exs is a side door: Hex
+      # honours it with no expiry and no reason. It WARNS rather than fails, because
+      # cobenian-steward already uses it -- fed from its own expiring
+      # `.hex_audit_exemptions.exs`, which predates this file -- and failing it would turn
+      # a repo that time-boxes correctly red the moment `v1` moves. Note the precedence:
+      # a non-empty HEX_IGNORE_ADVISORIES REPLACES mix.exs `ignore_advisories` (Hex reads
+      # the env first), so a repo must use one mechanism, not both.
       #
       # Fails on: an expired entry; a missing/invalid field; an expiry beyond the cap; a
       # wildcard or list in `id`; a duplicate id; an unknown key (a typo like `expire:`
@@ -469,13 +475,12 @@ jobs:
           # workflow can set a step's env, so it is not a way to defer an expiry.
           TODAY="${AUDIT_IGNORE_TODAY:-$(date -u +%F)}"
 
-          # The side door. Any mix.exs, so an umbrella app's cannot hide one either.
+          # The side door (see above). Any mix.exs, so an umbrella app's is seen too.
           side=$( (git ls-files -- 'mix.exs' '*/mix.exs' 2>/dev/null || true) \
                   | xargs -r grep -nwE 'ignore_(advisories|retirements)' 2>/dev/null || true)
           if [ -n "$side" ]; then
             echo "$side"
-            echo "::error title=Advisory ignore list::mix.exs sets hex ignore_advisories/ignore_retirements. Hex honours those with no expiry and no reason, so they bypass .audit-ignore.yml. Move advisories to .audit-ignore.yml (with a reason and an expiry); retired packages are not ignorable — replace the package. See STANDARDS.md §5.1."
-            exit 1
+            echo "::warning title=Advisory ignore list::mix.exs sets hex ignore_advisories/ignore_retirements. Hex honours those with no expiry and no reason unless the repo time-boxes them itself. Prefer .audit-ignore.yml, and do not use both: its ids replace mix.exs ignore_advisories. See STANDARDS.md §5.1."
           fi
 
           if [ ! -e "$FILE" ]; then

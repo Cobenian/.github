@@ -665,9 +665,11 @@ advisories:
 - **Stale entries warn, never fail** — once no tool reports the id (you upgraded), CI says
   to remove it.
 - **Retired packages are never ignorable.** Replace the package.
-- **`hex: [ignore_advisories: …, ignore_retirements: …]` in `mix.exs` is refused.** Hex
-  honours it with no reason and no expiry, so it would be a permanent side door around
-  all of the above.
+- **`hex: [ignore_advisories: …, ignore_retirements: …]` in `mix.exs` warns.** Hex
+  honours it with no reason and no expiry. It is not a failure only because
+  cobenian-steward already feeds it from its own expiring `.hex_audit_exemptions.exs`.
+  Do not use both mechanisms: a non-empty `.audit-ignore.yml` list *replaces* `mix.exs`
+  `ignore_advisories` (Hex reads the environment first). New repos use `.audit-ignore.yml`.
 
 **Who may add an entry:** an engineer who has read the advisory and the code paths it
 touches in this repo. It lands by PR like any change, so the diff — the reason and the
@@ -865,7 +867,7 @@ Legend: ✅ done · ⚠️ partial/drift · ☐ not started · n/a not applicabl
   acknowledge one specific, assessed advisory in `.audit-ignore.yml` with a
   repo-specific reason and an expiry at most 90 days out; CI fails on an expired,
   over-long or malformed entry, warns on a stale one, keeps retired packages blocking,
-  and refuses the unexpiring `mix.exs` `hex: [ignore_advisories:]` side door. Prompted
+  and warns on the unexpiring `mix.exs` `hex: [ignore_advisories:]` side door. Prompted
   by two no-fix Cloak advisories blocking every cobenian-panel PR on 2026-10-10.
 
 - **1.7 (2026-08-23)** — **Added the `Client` repo profile (§1, §1.1)** for repos

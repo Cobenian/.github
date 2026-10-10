@@ -12,7 +12,8 @@
 #   * a malformed entry (typo'd key, wildcard id, no reason, impossible date) -> fails,
 #     rather than being read as "ignore with no expiry"
 #   * a retired package                    -> never ignorable, even if listed
-#   * mix.exs `hex: [ignore_advisories:]`  -> refused: Hex honours it with no expiry
+#   * mix.exs `hex: [ignore_advisories:]`  -> warns (Hex honours it with no expiry), but
+#     does not fail: cobenian-steward time-boxes its own and must not go red
 #
 # and the positive controls: a listed, in-date advisory passes, and a stale entry only warns.
 #
@@ -247,10 +248,14 @@ t "a retired package fails even with the list in place" "validate=0 hex=1 deps=0
 $(entry $CTR 2027-01-08)")"
 t "…even if HEX_IGNORE_RETIREMENTS leaked into the environment" "validate=0 hex=1 deps=0" \
   "$(HEX_IGNORE_RETIREMENTS=poison RETIRED=poison run '')"
-t "mix.exs hex ignore_advisories (no expiry) is refused" "validate=1 hex=skip deps=skip" \
+
+echo "the mix.exs side door warns, and does not fail a repo that already uses it:"
+t "mix.exs hex ignore_advisories — gates still run" "validate=0 hex=0 deps=0" \
   "$(MIXEXS='def project, do: [hex: [ignore_advisories: ["EEF-CVE-2026-95105"]]]' run '')"
-t "mix.exs hex ignore_retirements is refused" "validate=1 hex=skip deps=skip" \
-  "$(MIXEXS='def project, do: [hex: [ignore_retirements: [:poison]]]' run '')"
+t "…with a warning"                          "1" "$(logs '::warning title=Advisory ignore list::mix.exs sets hex')"
+t "mix.exs hex ignore_retirements — warns"   "1" \
+  "$(MIXEXS='def project, do: [hex: [ignore_retirements: [:poison]]]' run '' >/dev/null; logs '::warning title=Advisory ignore list::mix.exs sets hex')"
+t "no mix.exs ignores — no warning"          "0" "$(run '' >/dev/null; logs 'mix.exs sets hex')"
 
 echo "a stale entry warns and never fails:"
 t "listed but no longer reported — passes"   "validate=0 hex=0 deps=0" \
