@@ -90,6 +90,7 @@ jobs:
 | `otp-version` | `29.0.5` | |
 | `postgres_image` | `postgres:17` | |
 | `gitleaks_version` | `8.21.2` | CLI binary (the action needs a paid org license) |
+| `audit_ignore_max_days` | `90` | furthest an `.audit-ignore.yml` entry may expire (1–365). See STANDARDS.md §5.1 |
 
 ## Weekly mutation sample and unit test improvement
 

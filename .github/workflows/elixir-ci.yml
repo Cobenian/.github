@@ -57,6 +57,12 @@ on:
       gitleaks_version:
         type: string
         default: "8.21.2"
+      audit_ignore_max_days:
+        description: >-
+          Furthest an .audit-ignore.yml entry may expire from today, in days. An entry
+          further out fails the build. Capped at 365 whatever is passed. See STANDARDS.md §5.1.
+        type: number
+        default: 90
 
 permissions:
   contents: read
@@ -419,13 +425,205 @@ jobs:
       # scan: credo failing is not a reason to stop asking whether a credential was
       # committed. gitleaks is therefore exempt from ALL of this ordering, by its own
       # `if:` above, rather than by being placed late.
-      - name: hex.audit (retired packages)
-        run: mix hex.audit
+      # --- advisory ignore list: acknowledged, assessed, and EXPIRING ---
+      # A published advisory against a dependency we use in a way it does not affect, with
+      # no fixed release to move to, blocks every PR in the repo until upstream ships --
+      # cobenian-panel on 2026-10-10, two Cloak advisories, nothing to upgrade to. The two
+      # bad answers are making the audit report-only (which hides the NEXT advisory too) and
+      # an open-ended ignore (which nobody revisits). This is the third answer:
+      # `.audit-ignore.yml` at the repo root names ONE advisory per entry, says why it does
+      # not affect THIS repo, and expires -- and an expired entry fails the build, so the
+      # acknowledgement cannot quietly outlive the assessment behind it.
+      #
+      #   advisories:
+      #     - id: EEF-CVE-2026-95105        # exact id; no wildcards, one per entry
+      #       package: cloak
+      #       reason: "Uses only Cloak.Ciphers.AES.GCM (authenticated); no fixed release"
+      #       expires: 2027-01-08           # <= audit_ignore_max_days (default 90) out
+      #       added_by: Bryan Weber
+      #
+      # THE TOOLS DO THE IGNORING, not a parser of their output. Hex >= 2.5.1 reads
+      # HEX_IGNORE_ADVISORIES (matched on an advisory's id OR any alias, so a CVE id works
+      # for an EEF/GHSA advisory) and mix_audit takes --ignore-advisory-ids. This step only
+      # decides WHICH ids may be passed, so a parse that went wrong can only fail to ignore
+      # something -- the build goes red, never green. On Hex < 2.5.1 the variable is unknown
+      # and nothing is ignored, which is the same fail-closed direction.
+      #
+      # RETIREMENTS ARE NOT IGNORABLE here: HEX_IGNORE_RETIREMENTS is never set and is
+      # unset in the gate. And `hex: [ignore_advisories: / ignore_retirements:]` in mix.exs
+      # is refused below, because Hex honours it with no expiry and no reason -- it would
+      # be an unexpiring side door around everything this step enforces.
+      #
+      # Fails on: an expired entry; a missing/invalid field; an expiry beyond the cap; a
+      # wildcard or list in `id`; a duplicate id; an unknown key (a typo like `expire:`
+      # must not read as "no expiry"). A stale entry -- one no tool reports any more --
+      # only WARNS, in the step after the gates.
+      - name: Advisory ignore list (.audit-ignore.yml)
+        id: audit_ignores
+        env:
+          MAX_DAYS: ${{ inputs.audit_ignore_max_days }}
+        run: |
+          set -euo pipefail
+          FILE=.audit-ignore.yml
+          # Self-test seam: pins "today" so expiry can be tested. Nothing in a caller's
+          # workflow can set a step's env, so it is not a way to defer an expiry.
+          TODAY="${AUDIT_IGNORE_TODAY:-$(date -u +%F)}"
+
+          # The side door. Any mix.exs, so an umbrella app's cannot hide one either.
+          side=$( (git ls-files -- 'mix.exs' '*/mix.exs' 2>/dev/null || true) \
+                  | xargs -r grep -nwE 'ignore_(advisories|retirements)' 2>/dev/null || true)
+          if [ -n "$side" ]; then
+            echo "$side"
+            echo "::error title=Advisory ignore list::mix.exs sets hex ignore_advisories/ignore_retirements. Hex honours those with no expiry and no reason, so they bypass .audit-ignore.yml. Move advisories to .audit-ignore.yml (with a reason and an expiry); retired packages are not ignorable — replace the package. See STANDARDS.md §5.1."
+            exit 1
+          fi
+
+          if [ ! -e "$FILE" ]; then
+            echo "No $FILE — no advisories acknowledged; every advisory blocks."
+            echo "ids=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          case "$MAX_DAYS" in
+            ''|*[!0-9]*) ok=no ;;
+            *) if [ "$MAX_DAYS" -ge 1 ] && [ "$MAX_DAYS" -le 365 ]; then ok=yes; else ok=no; fi ;;
+          esac
+          if [ "$ok" = no ]; then
+            echo "::error title=Advisory ignore list::audit_ignore_max_days must be a whole number from 1 to 365 (got '$MAX_DAYS')."
+            exit 1
+          fi
+
+          command -v yq >/dev/null || { echo "::error title=Advisory ignore list::yq is not installed on this runner, so $FILE cannot be read. Nothing is ignored; failing rather than guessing."; exit 1; }
+          json=$(yq -o=json '.' "$FILE") || { echo "::error title=Advisory ignore list::$FILE is not valid YAML."; exit 1; }
+
+          # One jq program, emitting "error<TAB>msg", "notice<TAB>msg", "warning<TAB>msg"
+          # and "id<TAB>id" lines. Dates round-trip through strptime/strftime so 2027-02-30
+          # is rejected rather than normalised into March.
+          result=$(jq -r --arg today "$TODAY" --argjson max "$MAX_DAYS" '
+            def day: strptime("%Y-%m-%d") | mktime | . / 86400 | floor;
+            def valid_date: test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+              and ((try (strptime("%Y-%m-%d") | mktime | strftime("%Y-%m-%d")) catch "") == .);
+            ($today | day) as $t
+            | if type != "object" or ((.advisories // null) | type) != "array"
+                or (keys - ["advisories"]) != []
+              then "error\tthe file must be a mapping with exactly one key, `advisories:`, holding a list"
+              else
+                .advisories as $all
+                | ($all | map(.id? | strings | ascii_downcase)) as $ids
+                | $all | to_entries[] | .key as $i | .value as $e
+                | ("entry \($i + 1)" + (if ($e | type) == "object" and ($e.id | type) == "string" then " (\($e.id))" else "" end)) as $who
+                | if ($e | type) != "object" then "error\t\($who): must be a mapping"
+                  else
+                    ([ ($e | keys - ["id","package","reason","expires","added_by"])[]
+                         | "error\t\($who): unknown key `\(.)` — allowed: id, package, reason, expires, added_by" ]
+                     + [ ("id","package","reason","expires","added_by") as $k
+                         | select(($e[$k] | type) != "string" or ($e[$k] | test("^\\s*$")))
+                         | "error\t\($who): `\($k)` is missing or empty" ]
+                     + (if ($e.id | type) == "string" and ($e.id | test("^[A-Za-z0-9][A-Za-z0-9._:-]*$") | not)
+                        then ["error\t\($who): `id` must be ONE exact advisory id (letters, digits, . _ : -); no wildcards, spaces or lists"]
+                        else [] end)
+                     + (if ($e.id | type) == "string" and ([$ids[] | select(. == ($e.id | ascii_downcase))] | length) > 1
+                        then ["error\t\($who): duplicate id"] else [] end)
+                     + (if ($e.reason | type) == "string" and ($e.reason | length) < 20
+                        then ["error\t\($who): `reason` must say how THIS repo uses the package and why the advisory does not apply (20+ characters)"]
+                        else [] end)
+                     + (if ($e.expires | type) != "string" then []
+                        elif ($e.expires | valid_date | not)
+                        then ["error\t\($who): `expires` must be a real date written YYYY-MM-DD (got \($e.expires))"]
+                        else (($e.expires | day) - $t) as $left
+                          | if $left < 0
+                            then ["error\t\($who): EXPIRED on \($e.expires). Re-assess it: upgrade \($e.package // "the package") if a fixed release exists, or re-justify with a new reason and date, or remove the entry."]
+                            elif $left > $max
+                            then ["error\t\($who): expires \($e.expires), \($left) days out — more than the \($max)-day limit. Pick a date no later than \(($t + $max) * 86400 | strftime("%Y-%m-%d"))."]
+                            elif $left <= 14
+                            then ["warning\t\($who): expires \($e.expires) (\($left) days) — re-assess before then or the build fails"]
+                            else ["notice\t\($who) [\($e.package)]: acknowledged until \($e.expires) by \($e.added_by) — \($e.reason)"]
+                            end
+                        end)
+                    ) as $msgs
+                    # One message per line: a multi-line reason must not become a second
+                    # line the runner reads as its own workflow command.
+                    | ($msgs | map(gsub("[\r\n]+"; " "))) as $msgs
+                    | if ($msgs | map(select(startswith("error"))) | length) > 0 then $msgs[]
+                      else ($msgs[], "id\t\($e.id)") end
+                  end
+              end
+          ' <<<"$json") || { echo "::error title=Advisory ignore list::could not evaluate $FILE."; exit 1; }
+
+          errors=0; ids=()
+          while IFS=$'\t' read -r kind msg; do
+            case "$kind" in
+              error)   echo "::error title=Advisory ignore list::$FILE: $msg"; errors=$((errors+1)) ;;
+              warning) echo "::warning title=Advisory ignore list::$FILE: $msg" ;;
+              notice)  echo "::notice title=Advisory ignore list::$FILE: $msg" ;;
+              id)      ids+=("$msg") ;;
+              '')      : ;;
+              *)       echo "::error title=Advisory ignore list::unexpected evaluator output: $kind"; errors=$((errors+1)) ;;
+            esac
+          done <<<"$result"
+
+          if [ "$errors" -gt 0 ]; then
+            echo "$errors problem(s) in $FILE. Nothing is ignored until they are fixed."
+            exit 1
+          fi
+          joined=$(IFS=,; echo "${ids[*]:-}")
+          echo "ids=$joined" >> "$GITHUB_OUTPUT"
+          echo "Acknowledged advisories: ${joined:-none}"
+
+      - name: hex.audit (retired packages + advisories)
+        env:
+          HEX_IGNORE_ADVISORIES: ${{ steps.audit_ignores.outputs.ids }}
+        run: |
+          unset HEX_IGNORE_RETIREMENTS
+          mix hex.audit
         continue-on-error: ${{ contains(inputs.nonblocking, 'hex_audit') }}
 
       - name: deps.audit (Hex CVEs)
-        run: mix deps.audit
+        env:
+          IGNORE_IDS: ${{ steps.audit_ignores.outputs.ids }}
+        run: |
+          if [ -n "$IGNORE_IDS" ]; then
+            mix deps.audit --ignore-advisory-ids "$IGNORE_IDS"
+          else
+            mix deps.audit
+          fi
         continue-on-error: ${{ contains(inputs.nonblocking, 'deps_audit') }}
+
+      # STALE ENTRIES WARN, NEVER FAIL. An entry no tool reports any more -- the package was
+      # upgraded or dropped -- is harmless but is a standing exception nobody needs, so say
+      # so. Re-runs both tools WITHOUT ignores and looks for each id (or alias) in what
+      # they report. If either tool could not run, it says it cannot tell rather than
+      # calling every entry stale.
+      - name: Advisory ignore list — stale entries (warning only)
+        if: ${{ (success() || failure()) && steps.audit_ignores.outputs.ids != '' }}
+        continue-on-error: true
+        env:
+          IGNORE_IDS: ${{ steps.audit_ignores.outputs.ids }}
+        run: |
+          set -uo pipefail
+          unset HEX_IGNORE_ADVISORIES HEX_IGNORE_RETIREMENTS
+          d="${RUNNER_TEMP:-/tmp}/audit-stale"; mkdir -p "$d"
+          mix hex.audit > "$d/hex.txt" 2>&1; hex_rc=$?
+          mix deps.audit --format json > "$d/mixaudit.json" 2>/dev/null; mix_rc=$?
+          # "Ran" means the tool produced its own verdict, not merely an exit code: both
+          # can exit non-zero for a Mix error as well as for a finding.
+          hex_ran=no
+          if { [ "$hex_rc" -le 1 ] && grep -qE '^(Advisories:|Retired:|No retired or security advisory packages found)' "$d/hex.txt"; }; then hex_ran=yes; fi
+          mix_ran=no
+          if jq -e '.vulnerabilities | type == "array"' "$d/mixaudit.json" >/dev/null 2>&1; then mix_ran=yes; fi
+          if [ "$hex_ran" = no ] || [ "$mix_ran" = no ]; then
+            echo "::notice title=Advisory ignore list::could not re-run both audits (hex.audit: $hex_ran, deps.audit: $mix_ran) — stale entries not checked."
+            exit 0
+          fi
+          jq -r '.vulnerabilities[] | .advisory.id // empty' "$d/mixaudit.json" > "$d/mix-ids.txt"
+          IFS=, read -ra ids <<<"$IGNORE_IDS"
+          for id in "${ids[@]}"; do
+            if grep -qiwF -- "$id" "$d/hex.txt" || grep -qixF -- "$id" "$d/mix-ids.txt"; then
+              echo "in use: $id"
+            else
+              echo "::warning title=Advisory ignore list::.audit-ignore.yml entry $id is not reported by hex.audit or deps.audit any more — remove it."
+            fi
+          done
 
       # --- CI-computed security/freshness posture → workflow-run artifact (issue #106 Option A) ---
       # Re-runs the scanners in machine-readable mode, folds their results into ONE JSON
