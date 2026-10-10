@@ -29,6 +29,11 @@ jobs:
       - name: a scan posture never reports clean from a scanner that could not look
         run: bash tests/scan-posture-test.sh
 
+      # Every way an advisory acknowledgement could make CI greener than the assessment
+      # behind it: unlisted, expired, too long, malformed, retired, or via mix.exs.
+      - name: an acknowledged advisory is one exact id, assessed, and expires
+        run: bash tests/audit-ignore-test.sh
+
       # The weekly mutation sample and unit test improvement jobs run in every app repository
       # from the tools in tools/, checked out at the ref the caller pinned. These are the only
       # place those tools, and the steps that decide whether the jobs are configured, are tested.

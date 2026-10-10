@@ -1,0 +1,12 @@
+# .audit-ignore.yml — advisories this repo has assessed as NOT affecting it.
+# Rules: STANDARDS.md §5.1. Enforced by Cobenian/.github elixir-ci.yml.
+#
+# One entry per advisory id. Every field is required. `expires` is at most 90 days
+# out, and the build FAILS once it passes: re-assess (upgrade, re-justify, or remove).
+# Delete this file when it is empty.
+advisories:
+  - id: EEF-CVE-0000-00000          # exact id from hex.audit / deps.audit output
+    package: example_package
+    reason: "Which part of the package this repo uses, why the advisory's affected path is not it, and whether a fixed release exists"
+    expires: 2026-01-01
+    added_by: Your Name

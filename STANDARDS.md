@@ -1,6 +1,6 @@
 # Cobenian Engineering Standards — GitHub, CI & CD
 
-**Status:** Adopted · **Version:** 1.7 · **Last updated:** 2026-08-23
+**Status:** Adopted · **Version:** 1.8 · **Last updated:** 2026-10-10
 
 The single reference for how Cobenian repositories are structured, tested,
 deployed, and governed. The goal is **consistency by default**: every repo looks
@@ -191,7 +191,8 @@ checkout
 → mix test                           # blocking
 → mix dialyzer (cached PLTs)         # NON-blocking initially, then promote
 → gitleaks                           # blocking — secret scanning (all repos)
-→ mix hex.audit                      # blocking — retired packages    (LAST, see below)
+→ .audit-ignore.yml check            # blocking — expired/invalid acknowledgements (§5.1)
+→ mix hex.audit                      # blocking — retired packages + advisories (LAST, see below)
 → mix deps.audit                     # blocking — Hex CVEs (mix_audit)(LAST, see below)
 ```
 
@@ -588,7 +589,8 @@ and Dependabot:
 | Secret scanning | **gitleaks** (CLI binary, not the action) | CI job (all repos) + optional pre-commit hook |
 | Phoenix SAST | **Sobelow** | CI (apps) |
 | Hex CVEs | **mix_audit** (`mix deps.audit`) | CI (all) |
-| Retired packages | **mix hex.audit** | CI (all) |
+| Retired packages + Hex advisories | **mix hex.audit** | CI (all) |
+| Acknowledged advisories (expiring) | **`.audit-ignore.yml`** (§5.1) | CI (all) |
 | Dependency updates | **Dependabot** | `.github/dependabot.yml` (all) |
 | Vulnerability alerts | **Dependabot alerts + security updates** | repo setting (all) |
 
@@ -623,6 +625,60 @@ updates:
 
 > **Audit note:** no current repo has an `assets/package.json` (esbuild/tailwind are
 > mix-managed), so the **npm** block is omitted until JS deps actually appear.
+
+### 5.1 Acknowledging an advisory that does not affect you — `.audit-ignore.yml`
+
+An advisory is published against a dependency; you have read it, it does not affect how
+**this** repo uses the package, and there is no fixed release to move to. Without this,
+every PR in the repo stays red until upstream ships (cobenian-panel, 2026-10-10: two Cloak
+advisories against ciphers Panel does not use). Making the audit `nonblocking` is **not**
+the answer — it hides the *next* advisory too.
+
+Instead, add an entry to `.audit-ignore.yml` at the repo root (template:
+`templates/audit-ignore.yml`):
+
+```yaml
+advisories:
+  - id: EEF-CVE-2026-95105          # ONE exact advisory id (or one of its aliases, e.g. the CVE)
+    package: cloak
+    reason: "Panel uses only Cloak.Ciphers.AES.GCM (authenticated) and no Cloak.Ecto.PBKDF2 fields; no fixed release exists"
+    expires: 2027-01-08             # YYYY-MM-DD, at most 90 days out
+    added_by: Bryan Weber
+```
+
+**The rules, all enforced by `elixir-ci.yml`:**
+
+- **One advisory per entry, by exact id.** No wildcards, no lists, no duplicates. The
+  same id is passed to both `hex.audit` (Hex ≥ 2.5.1 `HEX_IGNORE_ADVISORIES`, which also
+  matches an advisory's aliases) and `deps.audit` (`--ignore-advisory-ids`). If mix_audit
+  reports the same issue under a different id (e.g. a GHSA), that is a second entry.
+- **It expires, and an expired entry fails the build** — naming the entry. Then
+  re-assess: upgrade if a fixed release now exists; otherwise re-justify with a fresh
+  reason and a new date; or remove it. Do not just bump the date.
+- **At most 90 days out** (`audit_ignore_max_days`; a repo may set it lower, never above
+  365). Entries expiring within 14 days warn on every run.
+- **The `reason` must be specific to this repo** — which module/cipher/feature of the
+  package you use and why the advisory's affected path is not one of them, plus whether a
+  fix exists. "Not affected" or "n/a" is not a reason (and under 20 characters fails).
+- **Every field is required**, unknown keys fail (a typo'd `expire:` must not read as "no
+  expiry"), and the date must be real.
+- **Stale entries warn, never fail** — once no tool reports the id (you upgraded), CI says
+  to remove it.
+- **Retired packages are never ignorable.** Replace the package.
+- **`hex: [ignore_advisories: …, ignore_retirements: …]` in `mix.exs` warns.** Hex
+  honours it with no reason and no expiry. It is not a failure only because
+  cobenian-steward already feeds it from its own expiring `.hex_audit_exemptions.exs`.
+  Do not use both mechanisms: a non-empty `.audit-ignore.yml` list *replaces* `mix.exs`
+  `ignore_advisories` (Hex reads the environment first). New repos use `.audit-ignore.yml`.
+
+**Who may add an entry:** an engineer who has read the advisory and the code paths it
+touches in this repo. It lands by PR like any change, so the diff — the reason and the
+date — is what the reviewer approves; the reviewer is checking the assessment, not just
+that CI went green. `added_by` is the person who made the assessment, not the bot or
+session that typed it.
+
+Acknowledged advisories still appear in the scan posture artifact and in the weekly
+Security Audit issue: the list changes what *blocks*, not what is *reported*.
 
 ---
 
@@ -806,6 +862,13 @@ Legend: ✅ done · ⚠️ partial/drift · ☐ not started · n/a not applicabl
 ---
 
 ## Changelog
+
+- **1.8 (2026-10-10)** — **Expiring advisory acknowledgements (§5.1).** A repo can
+  acknowledge one specific, assessed advisory in `.audit-ignore.yml` with a
+  repo-specific reason and an expiry at most 90 days out; CI fails on an expired,
+  over-long or malformed entry, warns on a stale one, keeps retired packages blocking,
+  and warns on the unexpiring `mix.exs` `hex: [ignore_advisories:]` side door. Prompted
+  by two no-fix Cloak advisories blocking every cobenian-panel PR on 2026-10-10.
 
 - **1.7 (2026-08-23)** — **Added the `Client` repo profile (§1, §1.1)** for repos
   producing an artifact installed on someone else's device — first instance
