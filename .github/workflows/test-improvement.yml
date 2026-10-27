@@ -94,10 +94,10 @@ on:
         default: 25
       elixir-version:
         type: string
-        default: "1.20.3"
+        default: "1.20.4"
       otp-version:
         type: string
-        default: "29.0.5"
+        default: "29.1.2"
       python-version:
         type: string
         default: "3.13"

@@ -86,8 +86,8 @@ jobs:
 | `dialyzer_blocking` | `false` | Dialyzer is report-only by default; flip to `true` once PLTs are stable |
 | `sobelow_root` | `.` | `apps/<web_app>` for umbrellas |
 | `migrations_path` | `priv/repo/migrations` | duplicate-timestamp check target |
-| `elixir-version` | `1.20.3` | |
-| `otp-version` | `29.0.5` | |
+| `elixir-version` | `1.20.4` | |
+| `otp-version` | `29.1.2` | |
 | `postgres_image` | `postgres:17` | |
 | `gitleaks_version` | `8.21.2` | CLI binary (the action needs a paid org license) |
 | `audit_ignore_max_days` | `90` | furthest an `.audit-ignore.yml` entry may expire (1–365). See STANDARDS.md §5.1 |

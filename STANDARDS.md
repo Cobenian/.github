@@ -134,8 +134,8 @@ branch protection (§7) requires the `Build and test` check.
 
 | Thing | Pin |
 |---|---|
-| Elixir | `1.20.3` |
-| OTP | `29.0.5` |
+| Elixir | `1.20.4` |
+| OTP | `29.1.2` |
 | Postgres service | `postgres:17` |
 | `actions/checkout` | `v7` |
 | `actions/cache` | `v5` |
@@ -144,7 +144,7 @@ branch protection (§7) requires the `Build and test` check.
 | `superfly/flyctl-actions/setup-flyctl` | SHA-pinned (`ed8efb3`, = `v1.6`) |
 
 `.tool-versions` is the single source of truth for the language pins (`erlang
-29.0.5`, `elixir 1.20.3`, `postgres 17.4`); CI mirrors it. Let Dependabot keep the
+29.1.2`, `elixir 1.20.4-otp-29`, `postgres 17.4`); CI mirrors it. Let Dependabot keep the
 action versions current.
 
 `setup-flyctl` is pinned to a **commit SHA**, not a tag, because that step
@@ -275,8 +275,8 @@ jobs:
 
       - uses: erlef/setup-beam@v1
         with:
-          elixir-version: "1.20.3"
-          otp-version: "29.0.5"
+          elixir-version: "1.20.4"
+          otp-version: "29.1.2"
 
       - name: Cache deps and _build
         uses: actions/cache@v5
