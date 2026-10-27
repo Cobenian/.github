@@ -80,8 +80,31 @@ jobs:
       # hex.audit needs deps resolved (it reads the resolved tree, not just the lock).
       - run: mix deps.get
 
+      # Honour the repo's .audit-ignore.yml, as elixir-ci.yml does. Without this, an advisory a
+      # repo has formally accepted (cloak in accounts and panel: no fixed release, not
+      # affected) kept the issue open forever, and an issue that can never close is one nobody
+      # reads. Only UNEXPIRED entries are applied: an expired one stops being ignored here, so
+      # the issue reopens on the date, which is the point of the date. Validation (reason
+      # length, the 365-day cap, unknown keys) stays in CI, which blocks on it. A file this step
+      # cannot read ignores nothing, so a malformed file shows advisories rather than hiding them.
+      - name: Advisory ignore list (.audit-ignore.yml, unexpired only)
+        id: ignores
+        run: |
+          set -euo pipefail
+          if [ ! -e .audit-ignore.yml ]; then echo "ids=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          today=$(date -u +%F)
+          if ! ids=$(yq -o=json '.' .audit-ignore.yml | jq -r --arg today "$today" \
+                '[.advisories[]? | select((.expires | type) == "string" and .expires >= $today) | .id] | join(",")'); then
+            echo "::warning title=Advisory ignore list::.audit-ignore.yml could not be read; nothing is ignored."
+            ids=""
+          fi
+          echo "ids=$ids" >> "$GITHUB_OUTPUT"
+          echo "Acknowledged in .audit-ignore.yml and unexpired: ${ids:-none}"
+
       - name: Run mix hex.audit
         id: audit
+        env:
+          HEX_IGNORE_ADVISORIES: ${{ steps.ignores.outputs.ids }}
         run: |
           set +e
           mix hex.audit > audit.raw.txt 2>&1
