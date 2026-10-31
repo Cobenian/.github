@@ -17,7 +17,7 @@ on:
     inputs:
       elixir-version:
         type: string
-        default: "1.20.4"
+        default: "1.20.5"
       otp-version:
         type: string
         default: "29.1.2"
