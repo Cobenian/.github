@@ -1,7 +1,12 @@
 # The guard, as a check every pull request must pass before it can merge (the caller's main
 # requires it), whoever merges. It runs the caller's MAIN copy of its guard script against the
-# pull request's diff and never runs the pull request's code: callers trigger it from
-# `pull_request_target`, so the checkout below is main's tree.
+# pull request's diff and never runs the pull request's code. Callers trigger it from
+# `pull_request_target`, which runs the BASE branch's copy of the caller workflow and would check
+# out the base branch: so the checkout below names main explicitly, and a pull request whose base
+# isn't main fails. Otherwise a branch pushed with a doctored bin/guard could serve as the base,
+# turn the check green on the head sha, and the PR then be retargeted to main with the green check
+# still standing. Callers must include `edited` (it fires when the base changes), so main's guard
+# re-judges a retargeted PR.
 #
 # A person's own pull request passes: Bryan decides his own changes. A bot's or Dependabot's pull
 # request that touches something the guard script reserves fails until the approver adds the
@@ -14,7 +19,7 @@
 #
 #   on:
 #     pull_request_target:
-#       types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+#       types: [opened, synchronize, reopened, edited, labeled, unlabeled, ready_for_review]
 #   jobs:
 #     guard:
 #       uses: Cobenian/.github/.github/workflows/aws-guard.yml@v2
@@ -54,8 +59,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # main's tree, named explicitly: pull_request_target's default is the PR's base branch.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { fetch-depth: 0 }
+        with: { ref: main, fetch-depth: 0 }
 
       # The app's guard may parse mix.exs and mix.lock with Elixir (Code.string_to_quoted: read,
       # never evaluated). Installing Elixir runs nothing from the pull request.
@@ -71,6 +77,7 @@ jobs:
           AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           GUARD: ${{ inputs.guard-command }}
           APPROVER: ${{ inputs.approver }}
           LABEL: ${{ inputs.approval-label }}
@@ -118,6 +125,11 @@ jobs:
           }
           # --- End of the approval check. ---
           [ -n "$N" ] || { echo "::error::The guard must be triggered by pull_request_target."; exit 1; }
+          # Only a PR into main can pass: a green check earned against another base would survive
+          # a retarget to main on the same head sha.
+          if [ "$BASE_REF" != main ]; then
+            echo "::error::PR #$N targets '$BASE_REF', not main. The guard only passes pull requests into main."; exit 1
+          fi
           if [ "$AUTHOR_TYPE" = User ]; then echo "A person's change ($AUTHOR): theirs to decide."; exit 0; fi
           git fetch -q origin "+refs/pull/$N/head:refs/remotes/pr/head"
           if reasons=$($GUARD origin/main "$HEAD_SHA"); then echo "$reasons"; exit 0; fi
