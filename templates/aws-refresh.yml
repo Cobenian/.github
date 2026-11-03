@@ -1,0 +1,23 @@
+# → .github/workflows/refresh.yml in an AWS app. Weekly: rebuild and redeploy main for Debian
+# patches, and open an issue when a newer Elixir/OTP/Debian image is published.
+name: Refresh
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: read
+  id-token: write
+  issues: write
+
+jobs:
+  os-patches:
+    uses: ./.github/workflows/deploy.yml
+    with: { rebuild: true }
+    secrets: inherit
+
+  toolchain:
+    uses: Cobenian/.github/.github/workflows/aws-toolchain-check.yml@v2

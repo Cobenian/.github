@@ -1,0 +1,41 @@
+# → .github/workflows/deploy.yml in an AWS app. Deploys main once CI has passed on it.
+# Replace APP, URL and the role ARN. The role must trust only this repo's `production`
+# environment (immutable OIDC subject `repo:Cobenian@<orgId>/<repo>@<repoId>:environment:production`).
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      rebuild:
+        description: Build a fresh image even if this commit has one (OS patches)
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      rebuild:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  checks: read
+  id-token: write
+  issues: write
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    uses: Cobenian/.github/.github/workflows/aws-ecs-deploy.yml@v2
+    with:
+      app: APP
+      url: https://URL
+      deploy-role: arn:aws:iam::353254935868:role/APP-deployer
+      head-sha: ${{ github.event.workflow_run.head_sha }}
+      rebuild: ${{ inputs.rebuild == true }}
+    secrets: inherit

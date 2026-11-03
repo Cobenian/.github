@@ -1,0 +1,59 @@
+# Weekly: is a newer Elixir, OTP or Debian base image published than the one the Dockerfile
+# builds on? If so, open one issue (labelled for whoever fixes these) asking for the bump, so
+# security patches in the toolchain are not missed. The Dockerfile must carry
+# `ARG ELIXIR_VERSION=`, `ARG OTP_VERSION=` and `ARG DEBIAN_VERSION=` lines.
+#
+# Pair it with a weekly call to aws-ecs-deploy.yml with `rebuild: true` for Debian patches.
+# Extracted from cobenian-company's refresh.yml (2026-11-03). AWS apps call it at @v2.
+#
+#   on:
+#     schedule: [{ cron: "0 9 * * 1" }]
+#   jobs:
+#     toolchain:
+#       uses: Cobenian/.github/.github/workflows/aws-toolchain-check.yml@v2
+name: Toolchain check
+
+on:
+  workflow_call:
+    inputs:
+      dockerfile:
+        type: string
+        default: Dockerfile
+      issue-label:
+        type: string
+        default: engineer
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  toolchain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Compare the Dockerfile's versions with what's published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          LABEL: ${{ inputs.issue-label }}
+        run: |
+          arg() { sed -n "s/^ARG $1=//p" "$DOCKERFILE"; }
+          elixir=$(arg ELIXIR_VERSION); otp=$(arg OTP_VERSION); debian=$(arg DEBIAN_VERSION)
+          [ -n "$elixir" ] && [ -n "$otp" ] && [ -n "$debian" ] ||
+            { echo "::error::$DOCKERFILE must have ARG ELIXIR_VERSION, OTP_VERSION and DEBIAN_VERSION lines."; exit 1; }
+          minor=${elixir%.*}
+          latest=$(curl -fsS "https://hub.docker.com/v2/repositories/hexpm/elixir/tags?page_size=100&name=$minor." \
+            | jq -r '.results[].name' | grep -E "^[0-9.]+-erlang-[0-9.]+-debian-trixie-[0-9]+-slim$" | sort -V | tail -1)
+          [ -n "$latest" ] || { echo "Couldn't read Docker Hub; trying again next week."; exit 0; }
+          want="$elixir-erlang-$otp-debian-$debian"
+          echo "Dockerfile: $want"; echo "Published:  $latest"
+          [ "$latest" = "$want" ] && { echo "Up to date."; exit 0; }
+          title="Update the toolchain image to $latest"
+          if gh issue list --state open --search "$title in:title" --json number --jq 'length' | grep -qx 0; then
+            gh label create "$LABEL" --color 1D76DB --force >/dev/null
+            gh issue create --label "$LABEL" --title "$title" --body "The Dockerfile builds on \`$want\`; \`$latest\` is published.
+
+          Change the Dockerfile's ARG lines (ELIXIR_VERSION, OTP_VERSION, DEBIAN_VERSION) and .tool-versions to match, so local, CI and production use the same toolchain. Security patches in Elixir, OTP and Debian are the reason this exists."
+          fi
