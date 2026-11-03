@@ -1,6 +1,10 @@
 # → .github/workflows/deploy.yml in an AWS app. Deploys main once CI has passed on it.
-# Replace APP, URL and the role ARN. The role must trust only this repo's `production`
+# Replace APP, URL, STACK and the role ARN. The role must trust only this repo's `production`
 # environment (immutable OIDC subject `repo:Cobenian@<orgId>/<repo>@<repoId>:environment:production`).
+# STACK is the CloudFormation stack that owns the app's one AWS::ECS::TaskDefinition: each deploy
+# copies that (not the service's live revision) with only the image changed. The role needs
+# cloudformation:DescribeStackResources on it, and ecs:RegisterTaskDefinition + ecs:TagResource
+# (revisions are registered with the tag app=APP; require it with aws:RequestTag/app).
 name: Deploy
 
 on:
@@ -36,6 +40,8 @@ jobs:
       app: APP
       url: https://URL
       deploy-role: arn:aws:iam::353254935868:role/APP-deployer
+      stack-name: STACK
+      # max-severity: HIGH   # lowest image-scan severity that blocks (CRITICAL | HIGH | MEDIUM)
       head-sha: ${{ github.event.workflow_run.head_sha }}
       rebuild: ${{ inputs.rebuild == true }}
     secrets: inherit

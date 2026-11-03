@@ -1,14 +1,21 @@
 # Ship an AWS app's main once CI has passed on it: build the image (ARM, like Fargate), push it,
-# refuse it if the scan finds anything critical, roll the ECS service onto it, then verify and
-# watch. ECS rolls back a version that won't start or trips the app's error/5xx alarms; anything
-# found after that becomes an `incident` issue and an alert.
+# refuse it if the scan finds anything at or above `max-severity`, roll the ECS service onto it,
+# then verify and watch. ECS rolls back a version that won't start or trips the app's error/5xx
+# alarms; anything found after that becomes an `incident` issue and (best-effort) an alert.
 #
 # Extracted from cobenian-company's deploy.yml + bin/ecs-deploy + bin/verify (2026-11-03) so AWS
 # apps share one copy. AWS apps call it at @v2; Fly apps stay on @v1 (fly-*.yml).
 #
 # The app's names follow one convention: ECR repository, ECS cluster and ECS service are all
 # `inputs.app`, and the log group is `/ecs/<app>`. The caller supplies the deploy role, which
-# must trust only this repository's `production` environment.
+# must trust only this repository's `production` environment, and the CloudFormation stack that
+# owns the app's task definition (`stack-name`).
+#
+# The new revision is a copy of the task definition CloudFormation manages, never of whatever the
+# service runs now: a bad revision registered once by hand (or by a stolen deploy role) is not
+# carried into every later deploy. Only the image changes. The deploy role therefore needs
+# cloudformation:DescribeStackResources on that stack, and ecs:TagResource for tag-on-register
+# (every revision is registered with the tag app=<app>, so the role can require it).
 #
 #   jobs:
 #     deploy:
@@ -17,6 +24,7 @@
 #         app: cobenian-time
 #         url: https://time.cobenian.com
 #         deploy-role: arn:aws:iam::353254935868:role/cobenian-time-deployer
+#         stack-name: cobenian-time
 #         head-sha: ${{ github.event.workflow_run.head_sha }}
 #       secrets: inherit
 name: AWS ECS deploy
@@ -36,17 +44,35 @@ on:
         description: IAM role ARN to assume through GitHub OIDC
         type: string
         required: true
+      stack-name:
+        description: >-
+          The CloudFormation stack that owns the app's AWS::ECS::TaskDefinition (exactly one).
+          Each deploy copies that task definition with only the image changed, and refuses to
+          roll if the service runs a different task-definition family.
+        type: string
+        required: true
       aws-region:
         type: string
         default: us-east-1
       alerts-topic:
-        description: SNS topic for deploy incidents
+        description: >-
+          SNS topic for deploy incidents. Publishing is best-effort (a deploy role without
+          sns:Publish still gets the GitHub incident issue).
         type: string
         default: arn:aws:sns:us-east-1:353254935868:cobenian-security-alerts
       ci-check:
-        description: The check run that must have passed on the commit
+        description: >-
+          The check run that must have passed on the commit. Only a check run reported by
+          GitHub Actions (app slug github-actions) counts.
         type: string
         default: "build-and-test / Build and test"
+      max-severity:
+        description: >-
+          The lowest image-scan severity that blocks the deploy: CRITICAL (only critical),
+          HIGH (high or critical; the default) or MEDIUM (medium, high or critical). ECR basic
+          scanning sees OS packages only; Hex packages are covered by CI's hex.audit/deps.audit.
+        type: string
+        default: HIGH
       head-sha:
         description: The commit a workflow_run trigger was for; empty when run by hand
         type: string
@@ -95,13 +121,21 @@ jobs:
           HEAD_SHA: ${{ inputs.head-sha }}
           CI_CHECK: ${{ inputs.ci-check }}
           REBUILD: ${{ inputs.rebuild }}
+          MAX_SEVERITY: ${{ inputs.max-severity }}
         run: |
+          case "$MAX_SEVERITY" in CRITICAL|HIGH|MEDIUM) ;; *)
+            echo "::error::max-severity must be CRITICAL, HIGH or MEDIUM (got '$MAX_SEVERITY')."; exit 1 ;;
+          esac
           sha=$(git rev-parse HEAD)
           if [ -n "$HEAD_SHA" ] && [ "$HEAD_SHA" != "$sha" ]; then
             echo "A newer commit is on main; its own CI run will deploy it."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          ci=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" \
-            --jq "[.check_runs[] | select(.name == \"$CI_CHECK\")][0].conclusion")
+          # Only a check run GitHub Actions itself reported counts: anyone with checks:write (another
+          # App, a token) can post a check run with the same name. All pages, newest run last.
+          ci=$(gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?per_page=100" \
+            | jq -rs --arg name "$CI_CHECK" '[.[].check_runs[]
+                | select(.name == $name and .app.slug == "github-actions")]
+                | sort_by(.started_at) | last | .conclusion // empty')
           if [ "$ci" != success ]; then
             echo "CI on $sha is '$ci'; its own CI run will deploy it once it passes."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
@@ -130,13 +164,23 @@ jobs:
           docker build --pull --build-arg GIT_SHA="$SHA" -t "$REGISTRY/$APP:$TAG" .
           docker push "$REGISTRY/$APP:$TAG"
 
-      - name: Refuse critical vulnerabilities
+      # ECR basic scanning sees OS packages only. Hex packages are checked by CI's hex.audit and
+      # deps.audit, which must pass before this runs.
+      - name: Refuse vulnerabilities at or above max-severity
         if: steps.what.outputs.skip != 'true'
-        env: { TAG: "${{ steps.what.outputs.tag }}" }
+        env:
+          TAG: ${{ steps.what.outputs.tag }}
+          MAX_SEVERITY: ${{ inputs.max-severity }}
         run: |
+          case "$MAX_SEVERITY" in
+            CRITICAL) blocking='["CRITICAL"]' ;;
+            HIGH) blocking='["CRITICAL","HIGH"]' ;;
+            MEDIUM) blocking='["CRITICAL","HIGH","MEDIUM"]' ;;
+            *) echo "::error::max-severity must be CRITICAL, HIGH or MEDIUM (got '$MAX_SEVERITY')."; exit 1 ;;
+          esac
           # The scan starts a moment after the push, so "no scan yet" just means wait.
           status=PENDING
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             status=$(aws ecr describe-image-scan-findings --repository-name "$APP" --image-id imageTag="$TAG" \
               --query 'imageScanStatus.status' --output text 2>/dev/null || echo PENDING)
             [ "$status" = COMPLETE ] && break
@@ -146,28 +190,60 @@ jobs:
           [ "$status" = COMPLETE ] || { echo "::error::The image scan didn't finish in 10 minutes."; exit 1; }
           aws ecr describe-image-scan-findings --repository-name "$APP" --image-id imageTag="$TAG" \
             --query 'imageScanFindings.findingSeverityCounts' --output json | tee counts.json
-          [ "$(jq -r '.CRITICAL // 0' counts.json)" = 0 ] || { echo "::error::The image has critical vulnerabilities."; exit 1; }
+          # `null` (no findings at all) counts as zero.
+          found=$(jq --argjson b "$blocking" '[(. // {}) | to_entries[] | select(.key as $k | $b | index($k)) | .value] | add // 0' counts.json)
+          [ "$found" = 0 ] || { echo "::error::The image has $found vulnerabilities at $MAX_SEVERITY or above."; exit 1; }
 
-      # Copy the live task definition with the new image, register it, point the service at
-      # it, and wait. ECS keeps the old task serving until the new one is healthy and rolls back
-      # on its own if the new one won't start or trips an alarm; this fails when that happened.
+      # Copy the task definition CloudFormation manages (never the service's live one) with only
+      # the new image, register it with its tags plus app=<app>, point the service at it, and
+      # wait. ECS keeps the old task serving until the new one is healthy and rolls back on its
+      # own if the new one won't start or trips an alarm; this fails when that happened.
       - name: Roll the service
         if: steps.what.outputs.skip != 'true'
         env:
           IMAGE: ${{ steps.ecr.outputs.registry }}/${{ inputs.app }}:${{ steps.what.outputs.tag }}
+          STACK: ${{ inputs.stack-name }}
         run: |
+          base=$(aws cloudformation describe-stack-resources --stack-name "$STACK" \
+            --query "StackResources[?ResourceType=='AWS::ECS::TaskDefinition'].PhysicalResourceId" --output json)
+          [ "$(echo "$base" | jq length)" = 1 ] || {
+            echo "::error::Stack $STACK must hold exactly one AWS::ECS::TaskDefinition; it holds: $base"; exit 1; }
+          base=$(echo "$base" | jq -r '.[0]')
+          aws ecs describe-task-definition --task-definition "$base" --include TAGS > base.json
+          family=$(jq -r .taskDefinition.family base.json)
           live=$(aws ecs describe-services --cluster "$APP" --services "$APP" --query 'services[0].taskDefinition' --output text)
-          aws ecs describe-task-definition --task-definition "$live" --query taskDefinition \
-            | jq --arg img "$IMAGE" '.containerDefinitions[0].image = $img
-                | {family, taskRoleArn, executionRoleArn, networkMode, containerDefinitions,
-                   requiresCompatibilities, cpu, memory, runtimePlatform}' > taskdef.json
+          live_family=$(aws ecs describe-task-definition --task-definition "$live" --query taskDefinition.family --output text)
+          if [ "$live_family" != "$family" ]; then
+            echo "::error::Service $APP runs family '$live_family' ($live), but stack $STACK manages family '$family' ($base). Someone pointed the service elsewhere; find out who before deploying."
+            exit 1
+          fi
+          [ "$live" = "$base" ] || echo "The service runs $live; the new revision is built from $STACK's $base, not from it."
+          # Fields register-task-definition accepts. Any other field that isn't read-only fails the
+          # deploy, so a new task-definition feature is never dropped silently.
+          unknown=$(jq -r '.taskDefinition | keys - ["family","taskRoleArn","executionRoleArn","networkMode",
+                "containerDefinitions","volumes","placementConstraints","requiresCompatibilities","cpu",
+                "memory","pidMode","ipcMode","proxyConfiguration","inferenceAccelerators",
+                "ephemeralStorage","runtimePlatform","enableFaultInjection",
+                "taskDefinitionArn","revision","status","requiresAttributes","compatibilities",
+                "registeredAt","registeredBy","deregisteredAt","deleteRequestedAt"] | join(", ")' base.json)
+          [ -z "$unknown" ] || { echo "::error::$base has fields this workflow doesn't copy: $unknown. Add them to the copy."; exit 1; }
+          # Tags: the original's (minus aws:-prefixed ones, which only AWS may set), then app=<app>.
+          jq --arg img "$IMAGE" --arg app "$APP" '
+              (.taskDefinition | .containerDefinitions[0].image = $img
+                | {family, taskRoleArn, executionRoleArn, networkMode, containerDefinitions, volumes,
+                   placementConstraints, requiresCompatibilities, cpu, memory, pidMode, ipcMode,
+                   proxyConfiguration, inferenceAccelerators, ephemeralStorage, runtimePlatform,
+                   enableFaultInjection}
+                | with_entries(select(.value != null and .value != [])))
+              + {tags: ([(.tags // [])[] | select((.key | startswith("aws:")) or .key == "app" | not)]
+                        + [{key: "app", value: $app}])}' base.json > taskdef.json
           new=$(aws ecs register-task-definition --cli-input-json file://taskdef.json \
             --query taskDefinition.taskDefinitionArn --output text)
-          echo "Registered $new"
+          echo "Registered $new (from $base)"
           deployment=$(aws ecs update-service --cluster "$APP" --service "$APP" --task-definition "$new" \
             --query 'service.deployments[?status==`PRIMARY`].id | [0]' --output text)
           echo "Rolling out $deployment"
-          for i in $(seq 1 120); do
+          for _ in $(seq 1 120); do
             state=$(aws ecs describe-services --cluster "$APP" --services "$APP" \
               --query "services[0].deployments[?id=='$deployment'].rolloutState | [0]" --output text)
             case "$state" in

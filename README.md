@@ -66,6 +66,38 @@ reaches a Fly app. A change both need (a new Elixir in `elixir-ci.yml`, say) mov
 tags; the release notes say which moved. `v1` freezes when the Fly apps are retired. The `aws-*`
 workflows were extracted from cobenian-company's own loop so every AWS app shares one copy.
 
+What the `@v2` workflows check, and their inputs (each input is also described in the workflow):
+
+- **`aws-ecs-deploy.yml`** — `app`, `url`, `deploy-role`, `stack-name` (all required),
+  `aws-region` (us-east-1), `alerts-topic`, `ci-check`, `max-severity` (`HIGH`), `head-sha`,
+  `smoke-path` (`/sign-in`), `watch-minutes` (10), `rebuild` (false).
+  - Deploys only when the `ci-check` check run passed **and was reported by GitHub Actions**
+    (`app.slug == "github-actions"`), so a same-named check posted by anything else doesn't count.
+  - Blocks the image when ECR's scan finds anything at or above `max-severity`: `CRITICAL`,
+    `HIGH` (high or critical, the default) or `MEDIUM`. ECR basic scanning sees OS packages only;
+    Hex packages are covered by CI's `hex.audit` / `deps.audit`.
+  - Builds the new revision from the task definition **CloudFormation manages** in `stack-name`
+    (exactly one `AWS::ECS::TaskDefinition`), never from the service's live one, changing only
+    the image; registers it with the original's tags plus `app=<app>`; and refuses to roll if the
+    service runs a different task-definition family. The deploy role needs
+    `cloudformation:DescribeStackResources` on the stack and `ecs:TagResource` for
+    tag-on-register; it can require `aws:RequestTag/app`. The SNS alert is best-effort, so a
+    role without `sns:Publish` still gets the `incident` issue.
+- **`aws-guard.yml`** — `guard-command` (`bin/guard`), `approver` (`brweber2`),
+  `approval-label` (`bryan-approved`).
+- **`aws-automerge.yml`** — `bots` (`app/dependabot`), `environment` (`engineer`),
+  `app-id-secret`, `app-key-secret`, `guard-command`, `approver`, `approval-label`. It finds the
+  PR by the run's head sha (never the branch name, which a `pull_request_target` run may report
+  as the base).
+
+**Approval (guard and automerge, identical code):** a held change is approved only when the
+label is on the PR, the head is still the judged sha on a branch of this repo, and the issue
+events show a `labeled` event for the label **by the approver, created after the branch's latest
+push**. The latest push comes from GitHub's repository activity API
+(`GET /repos/{repo}/activity?ref=refs/heads/<branch>`), which records each push and force-push
+with a server timestamp and the sha it moved to; commit author/committer dates, which the commit's
+author chooses, are never used. All pages of events are read. Anything unreadable fails closed.
+
 ### Must be copied per repo (NOT inheritable)
 `ci.yml`, `fly-deploy.yml` (both **thin callers** now), `dependabot.yml`, `CODEOWNERS`.
 
