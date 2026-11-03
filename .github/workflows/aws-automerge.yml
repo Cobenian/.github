@@ -1,8 +1,14 @@
 # Merge the bot's and Dependabot's pull requests once CI and the guard pass, so updates reach
 # production with nobody clicking. The guard (the caller's main copy, never the pull request's)
 # keeps back anything that needs the approver; those are assigned to them with the reasons, and
-# merge here once they add the approval label. The caller's main should also require the guard
-# check, so no other path can merge them either.
+# merge here once the approver adds the approval label after the branch's latest push (the same
+# check as aws-guard, in identical text: a label from anyone else, or from before the latest push,
+# doesn't count). The caller's main should also require the guard check, so no other path can
+# merge them either.
+#
+# The pull request is found by the run's head sha (workflow_run.pull_requests, else GitHub's
+# commit-to-PR lookup), never by branch name: a Guard run triggered by pull_request_target can
+# report the base branch as its head_branch.
 #
 # The merge uses a GitHub App token: merges made with the built-in token don't start other
 # workflows, so the deploy would never run. The App's id and key are secrets of the caller's
@@ -25,8 +31,15 @@ name: Automerge
 on:
   workflow_call:
     inputs:
+      elixir-version:
+        description: Elixir for guard scripts that parse mix.exs/mix.lock (never runs the PR's code)
+        type: string
+        default: "1.20.5"
+      otp-version:
+        type: string
+        default: "29.1.2"
       bots:
-        description: Space-separated PR author logins the loop may merge (e.g. "app/dependabot app/my-bot")
+        description: Space-separated PR author logins (as gh prints them) the loop may merge (e.g. "app/dependabot app/my-bot")
         type: string
         default: app/dependabot
       environment:
@@ -34,18 +47,23 @@ on:
         type: string
         default: engineer
       app-id-secret:
+        description: Name of the environment secret holding the GitHub App's id
         type: string
         default: ENGINEER_APP_ID
       app-key-secret:
+        description: Name of the environment secret holding the GitHub App's private key
         type: string
         default: ENGINEER_APP_KEY
       guard-command:
+        description: The caller's guard script, run from main as `<command> <base> <head>`; exits 0 to pass
         type: string
         default: bin/guard
       approver:
+        description: The only login whose label counts as approval
         type: string
         default: brweber2
       approval-label:
+        description: The label the approver adds, after the latest push, to approve a held change
         type: string
         default: bryan-approved
 
@@ -72,14 +90,26 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_PRS: ${{ toJSON(github.event.workflow_run.pull_requests) }}
           BOTS: ${{ inputs.bots }}
         run: |
-          gh pr list -R "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number,author,headRefOid \
-            --jq '.[0] // {}' > pr.json
-          number=$(jq -r '.number // empty' pr.json); author=$(jq -r '.author.login // empty' pr.json)
-          [ -n "$number" ] || { echo "No open PR for $BRANCH."; exit 0; }
-          [ "$(jq -r .headRefOid pr.json)" = "$HEAD_SHA" ] || { echo "PR #$number has moved on since this run."; exit 0; }
+          # By head sha, never by branch name (a pull_request_target run may name the base branch).
+          # Candidates: the run's own pull_requests, plus GitHub's commit-to-PR lookup; kept only if
+          # open, in this repository, and with exactly this head.
+          { printf '%s' "$RUN_PRS" | jq -r '.[]?.number' || true
+            gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls" --jq '.[].number'
+          } | sort -un > candidates.txt
+          : > matches.txt
+          while read -r c; do
+            [ -n "$c" ] || continue
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$c" \
+              | jq -c --arg sha "$HEAD_SHA" --arg repo "$GITHUB_REPOSITORY" \
+                  'select(.state == "open" and .head.sha == $sha and .head.repo.full_name == $repo)
+                   | {number, author: (if .user.type == "Bot" then "app/" + (.user.login | sub("\\[bot\\]$"; "")) else .user.login end)}' >> matches.txt
+          done < candidates.txt
+          [ "$(grep -c . matches.txt || true)" -le 1 ] || { echo "More than one open PR has head $HEAD_SHA; merge by hand."; exit 0; }
+          number=$(jq -r '.number // empty' matches.txt); author=$(jq -r '.author // empty' matches.txt)
+          [ -n "$number" ] || { echo "No open PR in this repository has head $HEAD_SHA (it may have moved on)."; exit 0; }
           case " $BOTS " in
             *" $author "*) ;;
             *) echo "PR #$number is by $author; people merge their own."; exit 0 ;;
@@ -91,6 +121,14 @@ jobs:
         # main's tree: the guard that judges the change is never the change's own copy.
         with: { ref: main, fetch-depth: 0, token: "${{ steps.app.outputs.token }}" }
 
+      # The app's guard may parse mix.exs and mix.lock with Elixir (Code.string_to_quoted: read,
+      # never evaluated). Installing Elixir runs nothing from the pull request.
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        if: steps.pr.outputs.number
+        with:
+          otp-version: ${{ inputs.otp-version }}
+          elixir-version: ${{ inputs.elixir-version }}
+
       - name: Guard, then merge
         if: steps.pr.outputs.number
         env:
@@ -101,9 +139,50 @@ jobs:
           APPROVER: ${{ inputs.approver }}
           LABEL: ${{ inputs.approval-label }}
         run: |
+          # --- Approval check. IDENTICAL text in aws-guard.yml and aws-automerge.yml: change both. ---
+          # Approved means all of:
+          #   - the PR's head is still $HEAD_SHA, on a branch of this repository (a fork's PR is
+          #     never approved by label);
+          #   - the approval label is on the PR now;
+          #   - the issue events show a `labeled` event for that label, by $APPROVER, created after
+          #     the branch's latest push.
+          # "Latest push" is GitHub's own record of the branch moving: the repository activity API
+          # (GET /repos/{repo}/activity?ref=refs/heads/<branch>, newest first), whose entries
+          # (push, force_push, branch_creation, ...) carry a server-side timestamp and the sha the
+          # branch moved to. The newest entry must have moved the branch to $HEAD_SHA, or this
+          # fails closed. A commit's author/committer dates are never used: whoever writes the
+          # commit chooses them. Check-suite times aren't either: a sha pushed earlier to another
+          # branch already has suites from before it became this PR's head.
+          # Every page of events is read, and the matches are counted as lines.
+          approved() {
+            pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$N") || { echo "Couldn't read PR #$N."; return 1; }
+            if [ "$(printf '%s' "$pr" | jq -r .head.sha)" != "$HEAD_SHA" ]; then
+              echo "PR #$N has moved past $HEAD_SHA."; return 1
+            fi
+            if [ "$(printf '%s' "$pr" | jq -r .head.repo.full_name)" != "$GITHUB_REPOSITORY" ]; then
+              echo "PR #$N's branch is in another repository; a label can't approve it."; return 1
+            fi
+            if ! printf '%s' "$pr" | jq -e --arg l "$LABEL" 'any(.labels[]; .name == $l)' >/dev/null; then
+              echo "PR #$N doesn't carry $LABEL."; return 1
+            fi
+            ref=$(printf '%s' "$pr" | jq -r '"refs/heads/" + .head.ref | @uri')
+            last=$(gh api -H "Accept: application/vnd.github+json" \
+              "repos/$GITHUB_REPOSITORY/activity?ref=$ref&direction=desc&per_page=1" \
+              --jq '.[0] | "\(.timestamp) \(.after)"') || { echo "Couldn't read the branch's push history."; return 1; }
+            pushed=${last%% *}; after=${last#* }
+            if [ "$after" != "$HEAD_SHA" ] || [ -z "$pushed" ] || [ "$pushed" = null ]; then
+              echo "GitHub's newest record of the branch ('$last') isn't the push of $HEAD_SHA."; return 1
+            fi
+            count=$(gh api --paginate -H "Accept: application/vnd.github+json" "repos/$GITHUB_REPOSITORY/issues/$N/events?per_page=100" \
+              | jq -r --arg l "$LABEL" --arg who "$APPROVER" --arg t "$pushed" \
+                  '.[] | select(.event == "labeled" and .label.name == $l and .actor.login == $who and .created_at > $t) | .created_at' \
+              | grep -c .) || true
+            if [ "${count:-0}" -gt 0 ]; then echo "$APPROVER added $LABEL after the latest push ($pushed)."; return 0; fi
+            echo "No $LABEL label from $APPROVER after the latest push ($pushed)."; return 1
+          }
+          # --- End of the approval check. ---
           git fetch -q origin "+refs/pull/$N/head:refs/remotes/pr/head"
-          approved=$(gh pr view "$N" -R "$GITHUB_REPOSITORY" --json labels --jq "[.labels[].name] | index(\"$LABEL\") != null")
-          if reasons=$($GUARD origin/main "$HEAD_SHA") || [ "$approved" = true ]; then
+          if reasons=$($GUARD origin/main "$HEAD_SHA") || approved; then
             # Fails harmlessly while a required check is still running or failed.
             gh pr merge "$N" -R "$GITHUB_REPOSITORY" --squash --delete-branch --match-head-commit "$HEAD_SHA" ||
               echo "Not mergeable yet (a required check hasn't passed); the next check to finish tries again."
@@ -116,5 +195,5 @@ jobs:
 
           $reasons
 
-          Read the diff for the items above. If they're what you want, add the label **$LABEL** (it must be you, after the latest commit) and it merges and deploys on its own."
+          Read the diff for the items above. If they're what you want, add the label **$LABEL** (it must be you, after the latest push) and it merges and deploys on its own."
           fi

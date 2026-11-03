@@ -1,6 +1,7 @@
 # → .github/workflows/automerge.yml in an AWS app. Off until the repo variable
 # AUTOMERGE_ENABLED is "true" and the `engineer` environment holds the GitHub App's
-# ENGINEER_APP_ID and ENGINEER_APP_KEY secrets.
+# ENGINEER_APP_ID and ENGINEER_APP_KEY secrets. A held PR merges once the approver adds the
+# approval label after the branch's latest push (GitHub's push record, not commit dates).
 name: Automerge
 
 on:
