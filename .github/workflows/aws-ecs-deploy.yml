@@ -1,0 +1,229 @@
+# Ship an AWS app's main once CI has passed on it: build the image (ARM, like Fargate), push it,
+# refuse it if the scan finds anything critical, roll the ECS service onto it, then verify and
+# watch. ECS rolls back a version that won't start or trips the app's error/5xx alarms; anything
+# found after that becomes an `incident` issue and an alert.
+#
+# Extracted from cobenian-company's deploy.yml + bin/ecs-deploy + bin/verify (2026-11-03) so AWS
+# apps share one copy. AWS apps call it at @v2; Fly apps stay on @v1 (fly-*.yml).
+#
+# The app's names follow one convention: ECR repository, ECS cluster and ECS service are all
+# `inputs.app`, and the log group is `/ecs/<app>`. The caller supplies the deploy role, which
+# must trust only this repository's `production` environment.
+#
+#   jobs:
+#     deploy:
+#       uses: Cobenian/.github/.github/workflows/aws-ecs-deploy.yml@v2
+#       with:
+#         app: cobenian-time
+#         url: https://time.cobenian.com
+#         deploy-role: arn:aws:iam::353254935868:role/cobenian-time-deployer
+#         head-sha: ${{ github.event.workflow_run.head_sha }}
+#       secrets: inherit
+name: AWS ECS deploy
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: ECR repository, ECS cluster and service name; log group is /ecs/<app>
+        type: string
+        required: true
+      url:
+        description: The app's public URL (serves /version, /readyz and the smoke path)
+        type: string
+        required: true
+      deploy-role:
+        description: IAM role ARN to assume through GitHub OIDC
+        type: string
+        required: true
+      aws-region:
+        type: string
+        default: us-east-1
+      alerts-topic:
+        description: SNS topic for deploy incidents
+        type: string
+        default: arn:aws:sns:us-east-1:353254935868:cobenian-security-alerts
+      ci-check:
+        description: The check run that must have passed on the commit
+        type: string
+        default: "build-and-test / Build and test"
+      head-sha:
+        description: The commit a workflow_run trigger was for; empty when run by hand
+        type: string
+        default: ""
+      smoke-path:
+        description: A page that must answer 200 after the deploy
+        type: string
+        default: /sign-in
+      watch-minutes:
+        type: number
+        default: 10
+      rebuild:
+        description: Build a fresh image even if this commit has one (OS patches)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  checks: read
+  id-token: write
+  issues: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 75
+    # Only jobs in the production environment (which only protected branches may use) get a
+    # token the app's deploy role accepts.
+    environment: production
+    concurrency:
+      group: aws-ecs-deploy-${{ inputs.app }}
+      cancel-in-progress: false
+    env:
+      APP: ${{ inputs.app }}
+      APP_URL: ${{ inputs.url }}
+      AWS_REGION: ${{ inputs.aws-region }}
+      ALERTS: ${{ inputs.alerts-topic }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { ref: main }
+
+      - name: Only the newest main, and only once CI passed on it
+        id: what
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ inputs.head-sha }}
+          CI_CHECK: ${{ inputs.ci-check }}
+          REBUILD: ${{ inputs.rebuild }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          if [ -n "$HEAD_SHA" ] && [ "$HEAD_SHA" != "$sha" ]; then
+            echo "A newer commit is on main; its own CI run will deploy it."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          ci=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" \
+            --jq "[.check_runs[] | select(.name == \"$CI_CHECK\")][0].conclusion")
+          if [ "$ci" != success ]; then
+            echo "CI on $sha is '$ci'; its own CI run will deploy it once it passes."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          tag=$sha
+          [ "$REBUILD" = true ] && tag="$sha-r$GITHUB_RUN_NUMBER"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"; echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        if: steps.what.outputs.skip != 'true'
+        with: { role-to-assume: "${{ inputs.deploy-role }}", aws-region: "${{ inputs.aws-region }}" }
+
+      - uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+        if: steps.what.outputs.skip != 'true'
+        id: ecr
+
+      - name: Build and push (skipped when this exact image already exists)
+        if: steps.what.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.what.outputs.tag }}
+          SHA: ${{ steps.what.outputs.sha }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          if aws ecr describe-images --repository-name "$APP" --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            echo "Image $TAG already pushed."; exit 0
+          fi
+          docker build --pull --build-arg GIT_SHA="$SHA" -t "$REGISTRY/$APP:$TAG" .
+          docker push "$REGISTRY/$APP:$TAG"
+
+      - name: Refuse critical vulnerabilities
+        if: steps.what.outputs.skip != 'true'
+        env: { TAG: "${{ steps.what.outputs.tag }}" }
+        run: |
+          # The scan starts a moment after the push, so "no scan yet" just means wait.
+          status=PENDING
+          for i in $(seq 1 60); do
+            status=$(aws ecr describe-image-scan-findings --repository-name "$APP" --image-id imageTag="$TAG" \
+              --query 'imageScanStatus.status' --output text 2>/dev/null || echo PENDING)
+            [ "$status" = COMPLETE ] && break
+            [ "$status" = FAILED ] && { echo "::error::The image scan failed."; exit 1; }
+            sleep 10
+          done
+          [ "$status" = COMPLETE ] || { echo "::error::The image scan didn't finish in 10 minutes."; exit 1; }
+          aws ecr describe-image-scan-findings --repository-name "$APP" --image-id imageTag="$TAG" \
+            --query 'imageScanFindings.findingSeverityCounts' --output json | tee counts.json
+          [ "$(jq -r '.CRITICAL // 0' counts.json)" = 0 ] || { echo "::error::The image has critical vulnerabilities."; exit 1; }
+
+      # Copy the live task definition with the new image, register it, point the service at
+      # it, and wait. ECS keeps the old task serving until the new one is healthy and rolls back
+      # on its own if the new one won't start or trips an alarm; this fails when that happened.
+      - name: Roll the service
+        if: steps.what.outputs.skip != 'true'
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ inputs.app }}:${{ steps.what.outputs.tag }}
+        run: |
+          live=$(aws ecs describe-services --cluster "$APP" --services "$APP" --query 'services[0].taskDefinition' --output text)
+          aws ecs describe-task-definition --task-definition "$live" --query taskDefinition \
+            | jq --arg img "$IMAGE" '.containerDefinitions[0].image = $img
+                | {family, taskRoleArn, executionRoleArn, networkMode, containerDefinitions,
+                   requiresCompatibilities, cpu, memory, runtimePlatform}' > taskdef.json
+          new=$(aws ecs register-task-definition --cli-input-json file://taskdef.json \
+            --query taskDefinition.taskDefinitionArn --output text)
+          echo "Registered $new"
+          deployment=$(aws ecs update-service --cluster "$APP" --service "$APP" --task-definition "$new" \
+            --query 'service.deployments[?status==`PRIMARY`].id | [0]' --output text)
+          echo "Rolling out $deployment"
+          for i in $(seq 1 120); do
+            state=$(aws ecs describe-services --cluster "$APP" --services "$APP" \
+              --query "services[0].deployments[?id=='$deployment'].rolloutState | [0]" --output text)
+            case "$state" in
+              COMPLETED) echo "Rollout complete."; exit 0 ;;
+              FAILED) echo "::error::ECS rolled the deploy back (it wouldn't start, or tripped an alarm)."; exit 1 ;;
+              None) echo "::error::The deployment is no longer listed; ECS rolled it back or a newer one replaced it."; exit 1 ;;
+            esac
+            sleep 15
+          done
+          echo "::error::Rollout still not finished after 30 minutes."; exit 1
+
+      # Is the new version really serving, and is it well? /version must report the commit,
+      # /readyz must pass, the smoke page must answer, then the logs must stay free of error
+      # lines for the watch window.
+      - name: Verify and watch
+        if: steps.what.outputs.skip != 'true'
+        env:
+          SHA: ${{ steps.what.outputs.sha }}
+          SMOKE: ${{ inputs.smoke-path }}
+          WATCH_MINUTES: ${{ inputs.watch-minutes }}
+        run: |
+          fail() { echo "::error::VERIFY FAILED: $*"; exit 1; }
+          i=0
+          until curl -fsS --max-time 10 "$APP_URL/version" | grep -q "\"$SHA\""; do
+            i=$((i + 1)); [ $i -gt 60 ] && fail "/version never reported $SHA (10 minutes)."
+            sleep 10
+          done
+          echo "Serving $SHA."
+          curl -fsS --max-time 10 "$APP_URL/readyz" | grep -q '"status":"pass"' || fail "/readyz isn't passing: $(curl -s "$APP_URL/readyz")"
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$APP_URL$SMOKE")
+          [ "$code" = 200 ] || fail "$SMOKE answered $code."
+          echo "Ready."
+          start=$(( $(date +%s) * 1000 ))
+          sleep $((WATCH_MINUTES * 60))
+          errors=$(aws logs filter-log-events --log-group-name "/ecs/$APP" --start-time "$start" \
+            --filter-pattern '"[error]"' --query 'events[].message' --output text | head -c 4000)
+          [ -z "$errors" ] || fail "errors logged in the $WATCH_MINUTES minutes after the deploy:
+          $errors"
+          curl -fsS --max-time 10 "$APP_URL/readyz" | grep -q '"status":"pass"' || fail "/readyz stopped passing during the watch."
+          echo "Quiet for $WATCH_MINUTES minutes. Verified."
+
+      - name: Incident
+        if: failure()
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          sha=$(git rev-parse --short HEAD)
+          run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          title="Deploy of $sha failed"
+          body="The deploy of $sha failed: $run
+
+          ECS keeps the last good version serving when a new one won't start or trips an alarm, so the site should still be up; check $APP_URL/version."
+          gh label create incident --color B60205 --force >/dev/null
+          existing=$(gh issue list --label incident --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then gh issue comment "$existing" --body "$body"; else
+            url=$(gh issue create --label incident --title "$title" --body "$body")
+            aws sns publish --topic-arn "$ALERTS" --subject "[$APP] $title" --message "$body
+
+          Issue: $url" || true
+          fi

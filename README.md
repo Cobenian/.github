@@ -22,6 +22,10 @@ The canonical, org-wide normative docs (RFC 2119). Every product cites these.
   workflows/
     elixir-ci.yml          # REUSABLE CI (workflow_call) — the heavy lifting
     fly-deploy.yml         # REUSABLE deploy (workflow_call) — retry + --wait-timeout + smoke
+    aws-ecs-deploy.yml     # REUSABLE AWS ECS deploy: build, scan gate, roll, verify + watch (@v2)
+    aws-guard.yml          # REUSABLE guard check: runs the caller's main bin/guard on a PR (@v2)
+    aws-automerge.yml      # REUSABLE automerge of bot PRs once CI + guard pass (@v2)
+    aws-toolchain-check.yml # REUSABLE weekly Elixir/OTP/Debian image check (@v2)
     mutation.yml           # REUSABLE weekly mutation sample (workflow_call)
     test-improvement.yml   # REUSABLE weekly unit test improvement (workflow_call)
 tools/                     # mutation-sample, test-improvement-verify — checked out by those two
@@ -35,6 +39,10 @@ templates/                 # COPY these into each consumer repo (not inherited)
   fly-deploy.yml           # thin caller of the reusable deploy (workflow_run trigger + app inputs)
   mutation.yml             # thin caller of the weekly mutation sample
   test-improvement.yml     # thin caller of the weekly unit test improvement
+  aws-deploy.yml           # AWS apps: → .github/workflows/deploy.yml
+  aws-guard.yml            # AWS apps: → .github/workflows/guard.yml
+  aws-automerge.yml        # AWS apps: → .github/workflows/automerge.yml
+  aws-refresh.yml          # AWS apps: → .github/workflows/refresh.yml
   dependabot-app.yml       # → .github/dependabot.yml  (apps)
   dependabot-library.yml   # → .github/dependabot.yml  (libraries)
   CODEOWNERS               # → .github/CODEOWNERS       (not inheritable)
@@ -50,6 +58,13 @@ define its own — no per-repo copy needed.
 `uses: Cobenian/.github/.github/workflows/<name>@v1`. Tag releases (`v1`, `v1.1`,
 …) so consumers pin and bump deliberately; `v1` is the moving major pointer.
 Deploy inputs are documented in [`STANDARDS.md`](STANDARDS.md) §4.
+
+### Two lines: `v1` for Fly apps, `v2` for AWS apps (2026-11-03)
+AWS apps (ECS on Fargate) call the `aws-*.yml` workflows **at `@v2`**; Fly apps stay on
+`@v1`. Each tag is moved separately, so an AWS-only change ships by moving `v2` alone and never
+reaches a Fly app. A change both need (a new Elixir in `elixir-ci.yml`, say) moves **both**
+tags; the release notes say which moved. `v1` freezes when the Fly apps are retired. The `aws-*`
+workflows were extracted from cobenian-company's own loop so every AWS app shares one copy.
 
 ### Must be copied per repo (NOT inheritable)
 `ci.yml`, `fly-deploy.yml` (both **thin callers** now), `dependabot.yml`, `CODEOWNERS`.

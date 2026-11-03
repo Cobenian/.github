@@ -1,0 +1,72 @@
+# The guard, as a check every pull request must pass before it can merge (the caller's main
+# requires it), whoever merges. It runs the caller's MAIN copy of its guard script against the
+# pull request's diff and never runs the pull request's code: callers trigger it from
+# `pull_request_target`, so the checkout below is main's tree.
+#
+# A person's own pull request passes: Bryan decides his own changes. A bot's or Dependabot's pull
+# request that touches something the guard script reserves fails until the approver adds the
+# approval label after its latest commit (a label added by anyone else, or before the latest
+# push, doesn't count).
+#
+# Each app owns its guard script (what it protects is that app's policy). Extracted from
+# cobenian-company's guard.yml (2026-11-03). AWS apps call it at @v2.
+#
+#   on:
+#     pull_request_target:
+#       types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+#   jobs:
+#     guard:
+#       uses: Cobenian/.github/.github/workflows/aws-guard.yml@v2
+name: Guard
+
+on:
+  workflow_call:
+    inputs:
+      guard-command:
+        description: The caller's guard script, run from main as `<command> <base> <head>`
+        type: string
+        default: bin/guard
+      approver:
+        description: The only login whose label counts as approval
+        type: string
+        default: brweber2
+      approval-label:
+        type: string
+        default: bryan-approved
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  guard:
+    name: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { fetch-depth: 0 }
+
+      - name: Judge the change with main's guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          N: ${{ github.event.pull_request.number }}
+          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GUARD: ${{ inputs.guard-command }}
+          APPROVER: ${{ inputs.approver }}
+          LABEL: ${{ inputs.approval-label }}
+        run: |
+          [ -n "$N" ] || { echo "::error::The guard must be triggered by pull_request_target."; exit 1; }
+          if [ "$AUTHOR_TYPE" = User ]; then echo "A person's change ($AUTHOR): theirs to decide."; exit 0; fi
+          git fetch -q origin "+refs/pull/$N/head:refs/remotes/pr/head"
+          if reasons=$($GUARD origin/main "$HEAD_SHA"); then echo "$reasons"; exit 0; fi
+          echo "$reasons"
+          pushed=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA" --jq .commit.committer.date)
+          approved=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$N/events" \
+            --jq "[.[] | select(.event == \"labeled\" and .label.name == \"$LABEL\" and .actor.login == \"$APPROVER\" and .created_at > \"$pushed\")] | length")
+          if [ "${approved:-0}" -gt 0 ]; then echo "$APPROVER approved it after the latest commit."; exit 0; fi
+          echo "::error::This change needs $APPROVER: add the label $LABEL (as $APPROVER) after reading it."
+          exit 1

@@ -1,0 +1,120 @@
+# Merge the bot's and Dependabot's pull requests once CI and the guard pass, so updates reach
+# production with nobody clicking. The guard (the caller's main copy, never the pull request's)
+# keeps back anything that needs the approver; those are assigned to them with the reasons, and
+# merge here once they add the approval label. The caller's main should also require the guard
+# check, so no other path can merge them either.
+#
+# The merge uses a GitHub App token: merges made with the built-in token don't start other
+# workflows, so the deploy would never run. The App's id and key are secrets of the caller's
+# `environment` (default "engineer"), so only this job can read them.
+#
+# Extracted from cobenian-company's automerge.yml (2026-11-03). AWS apps call it at @v2.
+#
+#   on:
+#     workflow_run:
+#       workflows: ["CI", "Guard"]
+#       types: [completed]
+#   jobs:
+#     merge:
+#       if: vars.AUTOMERGE_ENABLED == 'true'
+#       uses: Cobenian/.github/.github/workflows/aws-automerge.yml@v2
+#       with: { bots: "app/dependabot" }
+#       secrets: inherit
+name: Automerge
+
+on:
+  workflow_call:
+    inputs:
+      bots:
+        description: Space-separated PR author logins the loop may merge (e.g. "app/dependabot app/my-bot")
+        type: string
+        default: app/dependabot
+      environment:
+        description: The environment holding the App's id and key secrets
+        type: string
+        default: engineer
+      app-id-secret:
+        type: string
+        default: ENGINEER_APP_ID
+      app-key-secret:
+        type: string
+        default: ENGINEER_APP_KEY
+      guard-command:
+        type: string
+        default: bin/guard
+      approver:
+        type: string
+        default: brweber2
+      approval-label:
+        type: string
+        default: bryan-approved
+
+permissions:
+  contents: read
+
+jobs:
+  merge:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'pull_request_target')
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          app-id: ${{ secrets[inputs.app-id-secret] }}
+          private-key: ${{ secrets[inputs.app-key-secret] }}
+
+      - name: Which pull request, and is it one the loop may merge?
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          BOTS: ${{ inputs.bots }}
+        run: |
+          gh pr list -R "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number,author,headRefOid \
+            --jq '.[0] // {}' > pr.json
+          number=$(jq -r '.number // empty' pr.json); author=$(jq -r '.author.login // empty' pr.json)
+          [ -n "$number" ] || { echo "No open PR for $BRANCH."; exit 0; }
+          [ "$(jq -r .headRefOid pr.json)" = "$HEAD_SHA" ] || { echo "PR #$number has moved on since this run."; exit 0; }
+          case " $BOTS " in
+            *" $author "*) ;;
+            *) echo "PR #$number is by $author; people merge their own."; exit 0 ;;
+          esac
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.pr.outputs.number
+        # main's tree: the guard that judges the change is never the change's own copy.
+        with: { ref: main, fetch-depth: 0, token: "${{ steps.app.outputs.token }}" }
+
+      - name: Guard, then merge
+        if: steps.pr.outputs.number
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          N: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          GUARD: ${{ inputs.guard-command }}
+          APPROVER: ${{ inputs.approver }}
+          LABEL: ${{ inputs.approval-label }}
+        run: |
+          git fetch -q origin "+refs/pull/$N/head:refs/remotes/pr/head"
+          approved=$(gh pr view "$N" -R "$GITHUB_REPOSITORY" --json labels --jq "[.labels[].name] | index(\"$LABEL\") != null")
+          if reasons=$($GUARD origin/main "$HEAD_SHA") || [ "$approved" = true ]; then
+            # Fails harmlessly while a required check is still running or failed.
+            gh pr merge "$N" -R "$GITHUB_REPOSITORY" --squash --delete-branch --match-head-commit "$HEAD_SHA" ||
+              echo "Not mergeable yet (a required check hasn't passed); the next check to finish tries again."
+          elif gh pr view "$N" -R "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | index("needs-bryan") != null' | grep -qx true; then
+            echo "Already waiting for $APPROVER."
+          else
+            gh label create needs-bryan -R "$GITHUB_REPOSITORY" --color FBCA04 --force >/dev/null
+            gh pr edit "$N" -R "$GITHUB_REPOSITORY" --add-label needs-bryan --add-assignee "$APPROVER"
+            gh pr comment "$N" -R "$GITHUB_REPOSITORY" --body "CI passed, but this one is yours to merge.
+
+          $reasons
+
+          Read the diff for the items above. If they're what you want, add the label **$LABEL** (it must be you, after the latest commit) and it merges and deploys on its own."
+          fi
