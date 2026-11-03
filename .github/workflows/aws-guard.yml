@@ -23,6 +23,13 @@ name: Guard
 on:
   workflow_call:
     inputs:
+      elixir-version:
+        description: Elixir for guard scripts that parse mix.exs/mix.lock (never runs the PR's code)
+        type: string
+        default: "1.20.5"
+      otp-version:
+        type: string
+        default: "29.1.2"
       guard-command:
         description: The caller's guard script, run from main as `<command> <base> <head>`; exits 0 to pass, else prints the reasons
         type: string
@@ -49,6 +56,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { fetch-depth: 0 }
+
+      # The app's guard may parse mix.exs and mix.lock with Elixir (Code.string_to_quoted: read,
+      # never evaluated). Installing Elixir runs nothing from the pull request.
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ inputs.otp-version }}
+          elixir-version: ${{ inputs.elixir-version }}
 
       - name: Judge the change with main's guard
         env:

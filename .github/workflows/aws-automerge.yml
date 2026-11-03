@@ -31,6 +31,13 @@ name: Automerge
 on:
   workflow_call:
     inputs:
+      elixir-version:
+        description: Elixir for guard scripts that parse mix.exs/mix.lock (never runs the PR's code)
+        type: string
+        default: "1.20.5"
+      otp-version:
+        type: string
+        default: "29.1.2"
       bots:
         description: Space-separated PR author logins (as gh prints them) the loop may merge (e.g. "app/dependabot app/my-bot")
         type: string
@@ -113,6 +120,14 @@ jobs:
         if: steps.pr.outputs.number
         # main's tree: the guard that judges the change is never the change's own copy.
         with: { ref: main, fetch-depth: 0, token: "${{ steps.app.outputs.token }}" }
+
+      # The app's guard may parse mix.exs and mix.lock with Elixir (Code.string_to_quoted: read,
+      # never evaluated). Installing Elixir runs nothing from the pull request.
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        if: steps.pr.outputs.number
+        with:
+          otp-version: ${{ inputs.otp-version }}
+          elixir-version: ${{ inputs.elixir-version }}
 
       - name: Guard, then merge
         if: steps.pr.outputs.number
