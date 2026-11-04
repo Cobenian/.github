@@ -249,7 +249,23 @@ jobs:
             case "$state" in
               COMPLETED) echo "Rollout complete."; exit 0 ;;
               FAILED) echo "::error::ECS rolled the deploy back (it wouldn't start, or tripped an alarm)."; exit 1 ;;
-              None) echo "::error::The deployment is no longer listed; ECS rolled it back or a newer one replaced it."; exit 1 ;;
+              None)
+                # Replaced by a newer deployment, or rolled back and gone. A newer deployment of
+                # the same image (the app's stack update landing at the same moment: issue #44 in
+                # cobenian-company, 2026-11-03) is not a failure, so follow that one. A rollback
+                # puts the old image back, so it still fails here.
+                now=$(aws ecs describe-services --cluster "$APP" --services "$APP" \
+                  --query 'services[0].deployments[?status==`PRIMARY`] | [0].[id, taskDefinition]' --output text)
+                now_id=$(echo "$now" | cut -f1); now_td=$(echo "$now" | cut -f2)
+                now_image=$(aws ecs describe-task-definition --task-definition "$now_td" \
+                  --query 'taskDefinition.containerDefinitions[0].image' --output text)
+                if [ "$now_image" = "$IMAGE" ] && [ "$now_id" != "$deployment" ]; then
+                  echo "A newer deployment of the same image replaced this one (a stack update); following $now_id."
+                  deployment=$now_id
+                else
+                  echo "::error::The deployment is no longer listed, and what replaced it runs $now_image: ECS rolled it back or a different version replaced it."
+                  exit 1
+                fi ;;
             esac
             sleep 15
           done
