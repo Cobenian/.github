@@ -84,9 +84,9 @@ What the `@v2` workflows check, and their inputs (each input is also described i
     tag-on-register; it can require `aws:RequestTag/app`. The SNS alert is best-effort, so a
     role without `sns:Publish` still gets the `incident` issue.
 - **`aws-guard.yml`** — `guard-command` (`bin/guard`), `approver` (`brweber2`),
-  `approval-label` (`bryan-approved`). A person's own PR passes without the guard script only
-  if every push to its branch (the same activity API, all pages) was made by that person; a
-  push by anyone else, a branch in a fork, or history it can't read makes it judged like a bot's.
+  `approval-label` (`bryan-approved`). Every PR is judged by the guard script, whoever opened
+  it: there is no pass for a person's own PR (agents open theirs as `brweber2`). A held change
+  needs the approval below.
 - **`aws-automerge.yml`** — `bots` (`app/dependabot`), `environment` (`engineer`),
   `app-id-secret`, `app-key-secret`, `guard-command`, `approver`, `approval-label`. It finds the
   PR by the run's head sha (never the branch name, which a `pull_request_target` run may report
