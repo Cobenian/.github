@@ -24,6 +24,22 @@
 #   jobs:
 #     guard:
 #       uses: Cobenian/.github/.github/workflows/aws-guard.yml@v2
+#
+# Waiting is not failing (2026-11-04: every held PR showed a red X that only meant "waiting for
+# Bryan"). With `approval-status` set, the verdict is also a commit status of that name on the
+# head: pending while the change waits for the approver ("Waiting for brweber2's
+# bryan-approved label: ..."), success once it passes or is approved. The job itself then fails
+# only for real problems (not a pull_request_target run, a base other than main, a status it
+# couldn't post). The caller requires the status (from GitHub Actions, app id 15368) as well as
+# the check, and grants `statuses: write`:
+#
+#   permissions: { contents: read, pull-requests: read, issues: read, statuses: write }
+#   jobs:
+#     guard:
+#       uses: Cobenian/.github/.github/workflows/aws-guard.yml@v2
+#       with: { approval-status: "Bryan's approval" }
+#
+# Without it, a held change fails the check as before.
 name: Guard
 
 on:
@@ -48,11 +64,17 @@ on:
         description: The label the approver adds, after the latest push, to approve a held change
         type: string
         default: bryan-approved
+      approval-status:
+        description: >-
+          Name of a commit status to post the verdict as (pending while waiting for the approver,
+          success once passed or approved), so a held change waits instead of failing. Empty: a
+          held change fails the check, as before. Needs `statuses: write` from the caller.
+        type: string
+        default: ""
 
-permissions:
-  contents: read
-  pull-requests: read
-  issues: read
+# No permissions block here: the job runs with the caller's, which must be read-only
+# (contents, pull-requests, issues) plus `statuses: write` when approval-status is set. A block
+# here could only narrow them, and naming statuses would break every caller that doesn't grant it.
 
 jobs:
   guard:
@@ -80,7 +102,17 @@ jobs:
           GUARD: ${{ inputs.guard-command }}
           APPROVER: ${{ inputs.approver }}
           LABEL: ${{ inputs.approval-label }}
+          STATUS: ${{ inputs.approval-status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # The verdict as a commit status, when the caller asked for one (descriptions are cut
+          # to GitHub's 140 characters).
+          post() {
+            [ -n "$STATUS" ] || return 0
+            gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" -f state="$1" -f context="$STATUS" \
+              -f description="$(printf '%s' "$2" | tr '\n' ' ' | cut -c1-140)" -f target_url="$RUN_URL" >/dev/null ||
+              { echo "::error::Couldn't post the $STATUS status: the caller must grant statuses: write."; exit 1; }
+          }
           # --- Approval check. IDENTICAL text in aws-guard.yml and aws-automerge.yml: change both. ---
           # Approved means all of:
           #   - the PR's head is still $HEAD_SHA, on a branch of this repository (a fork's PR is
@@ -127,11 +159,21 @@ jobs:
           # Only a PR into main can pass: a green check earned against another base would survive
           # a retarget to main on the same head sha.
           if [ "$BASE_REF" != main ]; then
+            post failure "Targets $BASE_REF, not main."
             echo "::error::PR #$N targets '$BASE_REF', not main. The guard only passes pull requests into main."; exit 1
           fi
           git fetch -q origin "+refs/pull/$N/head:refs/remotes/pr/head"
-          if reasons=$($GUARD origin/main "$HEAD_SHA"); then echo "$reasons"; exit 0; fi
+          if reasons=$($GUARD origin/main "$HEAD_SHA"); then
+            echo "$reasons"; post success "Nothing here needs $APPROVER."; exit 0
+          fi
           echo "$reasons"
-          if approved; then exit 0; fi
+          if why=$(approved); then echo "$why"; post success "$why"; exit 0; fi
+          echo "$why"
+          held=$(printf '%s\n' "$reasons" | sed -n 's/^- //p' | head -1)
+          if [ -n "$STATUS" ]; then
+            post pending "Waiting for $APPROVER's $LABEL label: ${held:-it touches something only $APPROVER decides}"
+            echo "::notice::Waiting for $APPROVER: add the label $LABEL (as $APPROVER) after reading it, after its latest push. The $STATUS status stays pending until then."
+            exit 0
+          fi
           echo "::error::This change needs $APPROVER: add the label $LABEL (as $APPROVER) after reading it, after its latest push."
           exit 1
