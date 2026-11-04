@@ -99,7 +99,7 @@ jobs:
           older code over newer. The tip commit deploys from its own CI run."
           fi
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.freshness.outputs.fresh == 'true'
         with:
           ref: ${{ inputs.head_sha }} # deploy the exact validated SHA
