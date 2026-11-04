@@ -8,11 +8,13 @@
 # still standing. Callers must include `edited` (it fires when the base changes), so main's guard
 # re-judges a retargeted PR.
 #
-# A person's own pull request passes: Bryan decides his own changes. A bot's or Dependabot's pull
-# request that touches something the guard script reserves fails until the approver adds the
-# approval label after its branch's latest push, as GitHub recorded it (a label added by anyone
-# else, or before the latest push, doesn't count; commit dates are never trusted). aws-automerge
-# applies the same check, in identical text.
+# A person's own pull request passes: Bryan decides his own changes. But only while it is still
+# only theirs: if anyone else (an engineer bot with push access, say) has ever pushed to its
+# branch, it is judged exactly like a bot's. A bot's or Dependabot's pull request that touches
+# something the guard script reserves fails until the approver adds the approval label after its
+# branch's latest push, as GitHub recorded it (a label added by anyone else, or before the latest
+# push, doesn't count; commit dates are never trusted). aws-automerge applies the same approval
+# check, in identical text. It has no person's-PR pass to guard: it never merges a person's PR.
 #
 # Each app owns its guard script (what it protects is that app's policy). Extracted from
 # cobenian-company's guard.yml (2026-11-03). AWS apps call it at @v2.
@@ -77,6 +79,8 @@ jobs:
           AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           GUARD: ${{ inputs.guard-command }}
           APPROVER: ${{ inputs.approver }}
@@ -130,7 +134,34 @@ jobs:
           if [ "$BASE_REF" != main ]; then
             echo "::error::PR #$N targets '$BASE_REF', not main. The guard only passes pull requests into main."; exit 1
           fi
-          if [ "$AUTHOR_TYPE" = User ]; then echo "A person's change ($AUTHOR): theirs to decide."; exit 0; fi
+          # A person's PR is theirs to decide only if every push to its branch was theirs. The
+          # PR's author says who opened it, not who wrote what is on it now: anything with push
+          # access (an engineer bot, a token) can add commits to a person's branch and would ride
+          # the person's pass. So list every recorded move of the branch (the same activity API as
+          # the approval check, every page) and require each one's actor to be the author. Fails
+          # closed: if the history can't be read, is empty, or the branch lives in another
+          # repository (whose pushes this repository can't see), it is judged like a bot's.
+          # A branch name reused after deletion keeps its old history, so an old bot push to the
+          # same name also counts. That only ever makes the guard stricter.
+          only_author_pushed() {
+            if [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
+              echo "The branch is in $HEAD_REPO; its pushes can't be read here."; return 1
+            fi
+            ref=$(jq -rn --arg r "refs/heads/$HEAD_REF" '$r | @uri')
+            pushers=$(gh api --paginate -H "Accept: application/vnd.github+json" \
+              "repos/$GITHUB_REPOSITORY/activity?ref=$ref&per_page=100" \
+              --jq '.[] | .actor.login // "(unknown actor)"') || { echo "Couldn't read the branch's push history."; return 1; }
+            others=$(printf '%s\n' "$pushers" | grep -v -x -F -e "$AUTHOR" -e '' | sort -u | paste -sd, -) || true
+            if [ -z "$(printf '%s' "$pushers" | tr -d '[:space:]')" ]; then
+              echo "GitHub has no record of pushes to $HEAD_REF."; return 1
+            fi
+            if [ -n "$others" ]; then echo "Pushed to by someone other than $AUTHOR: $others."; return 1; fi
+            return 0
+          }
+          if [ "$AUTHOR_TYPE" = User ]; then
+            if why=$(only_author_pushed); then echo "A person's change ($AUTHOR): theirs to decide."; exit 0; fi
+            echo "$AUTHOR opened this, but it is judged like a bot's: $why"
+          fi
           git fetch -q origin "+refs/pull/$N/head:refs/remotes/pr/head"
           if reasons=$($GUARD origin/main "$HEAD_SHA"); then echo "$reasons"; exit 0; fi
           echo "$reasons"
