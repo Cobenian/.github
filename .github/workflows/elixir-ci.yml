@@ -85,7 +85,7 @@ jobs:
           --health-cmd "pg_isready -U postgres"
           --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Apps with hand-written migrations: fail fast on duplicate timestamps
       # (two PRs merged the same day can collide; only breaks once both land on main).
@@ -146,13 +146,13 @@ jobs:
           fi
           echo "UnattributedSpawn log-attribution guard enabled and loaded."
 
-      - uses: erlef/setup-beam@v1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: ${{ inputs.elixir-version }}
           otp-version: ${{ inputs.otp-version }}
 
       - name: Cache deps and _build
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             deps
@@ -298,7 +298,7 @@ jobs:
 
       # --- Dialyzer (report-only until dialyzer_blocking: true) ---
       - name: Cache Dialyzer PLTs
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: priv/plts
           key: ${{ runner.os }}-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-plt-v2-${{ hashFiles('**/mix.lock') }}
@@ -369,7 +369,7 @@ jobs:
       # is not the same as not blocking.
       - name: Cache gitleaks binary
         if: ${{ success() || failure() }}
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ./gitleaks
           key: gitleaks-${{ runner.os }}-${{ inputs.gitleaks_version }}
@@ -881,7 +881,7 @@ jobs:
       - name: Upload scan posture artifact (issue #106 Option A)
         if: ${{ always() }}
         continue-on-error: true
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # MUST equal the connector default GITHUB_SCAN_ARTIFACT_NAME — the Foundry
           # GitHub connector looks the artifact up by this exact name.
