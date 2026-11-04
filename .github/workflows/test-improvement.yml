@@ -121,7 +121,7 @@ jobs:
       # verifier refuses; and a mutated module must never be served from a stale bytecode cache.
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
@@ -207,7 +207,7 @@ jobs:
         run: |
           [ -n "$TOOLS_REPO" ] && [ -n "$TOOLS_SHA" ] || { echo "::error::job.workflow_sha is unavailable, so the tools' version cannot be pinned to this workflow's."; exit 1; }
           echo "tools: $TOOLS_REPO@$TOOLS_SHA"
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: steps.configured.outputs.go == 'true'
         with:
           repository: ${{ job.workflow_repository }}
@@ -231,18 +231,18 @@ jobs:
             sleep 2
           done
           docker logs db; echo "::error::Postgres did not become healthy"; exit 1
-      - uses: erlef/setup-beam@v1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         if: steps.configured.outputs.go == 'true' && inputs.language == 'elixir'
         with:
           elixir-version: ${{ inputs.elixir-version }}
           otp-version: ${{ inputs.otp-version }}
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         if: steps.configured.outputs.go == 'true'
         with:
           python-version: ${{ inputs.python-version }}
       - name: Cache deps and _build
         if: steps.configured.outputs.go == 'true' && inputs.language == 'elixir'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             deps

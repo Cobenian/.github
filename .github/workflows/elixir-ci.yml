@@ -85,7 +85,7 @@ jobs:
           --health-cmd "pg_isready -U postgres"
           --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Apps with hand-written migrations: fail fast on duplicate timestamps
       # (two PRs merged the same day can collide; only breaks once both land on main).
@@ -146,13 +146,13 @@ jobs:
           fi
           echo "UnattributedSpawn log-attribution guard enabled and loaded."
 
-      - uses: erlef/setup-beam@v1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: ${{ inputs.elixir-version }}
           otp-version: ${{ inputs.otp-version }}
 
       - name: Cache deps and _build
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             deps
@@ -161,8 +161,31 @@ jobs:
           restore-keys: ${{ runner.os }}-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-mix-
 
       # Authenticate to a private Cobenian Hex organization when a key is provided
-      # (repos with private Hex deps set the HEX_ORG_KEY secret; others no-op). Must
-      # run before deps.get so private packages resolve.
+      # (repos with private Hex deps set the HEX_ORG_KEY secret; others no-op), fetch the
+      # dependencies, and DEAUTHENTICATE before anything else runs.
+      #
+      # THE KEYS LIVE FOR THE FETCH AND NO LONGER. `mix hex.organization auth` writes the
+      # key into ~/.hex, where it stays for the rest of the job unless removed. Every step
+      # after this one -- compile, credo, sobelow and above all `mix test` -- runs the pull
+      # request's own code as the same user, and any of it can read ~/.hex. So this one
+      # step authenticates, runs deps.get, and deauthenticates every organization it
+      # authenticated on the way out (an EXIT trap, so a failed fetch removes them too),
+      # then checks no key is left on disk. If removal fails, so does the step, and the
+      # verification gates below never run with a key lying around.
+      #
+      # A cached deps/ needs no key: compiling fetched dependencies never talks to Hex,
+      # and the cache saves deps/ and _build, never ~/.hex. The only later steps that need
+      # the organization (hex.audit and hex.outdated read the private packages' registry
+      # entries) authenticate inside themselves and deauthenticate before they finish.
+      #
+      # What this does NOT cover. deps.get evaluates the pull request's mix.exs while the
+      # key is present. And the audit steps re-authenticate on the same runner AFTER the
+      # tests ran, so test code that planned ahead can still reach them: a process left
+      # running, a line appended to $GITHUB_PATH or $GITHUB_ENV (a `mix` of its own on
+      # PATH for the later steps), or an edit to the installed toolchain. This narrows
+      # the key from the whole job to the commands that need Hex; it does not make it
+      # safe from a hostile branch. Closing that means the Hex-reading audits run in a
+      # job that never runs the branch's code.
       #
       # Hex >= 2.5.0 prints "Authenticating to the cobenian repository with a stored
       # key is deprecated and will be removed" on every deps.get/hex.audit here. DO NOT
@@ -197,14 +220,47 @@ jobs:
       #   2. The 2.6 token is short-lived (~30 min, no refresh), so auth must run
       #      immediately before the fetch. It does here. Product Dockerfiles that
       #      consume the fly-deploy.yml hex_org_key build-secret need the same check.
-      - name: Authenticate private Hex organizations
+      #
+      # AN ID, SO THE POSTURE STEP CAN ASK. Every Mix-based scanner below needs the
+      # dependency tree; when this step fails they cannot answer, and several of them
+      # say so by exiting 0 with nothing to report -- which is indistinguishable from a
+      # clean result. `steps.deps.outcome` is the one honest signal that they could not
+      # have looked.
+      - name: deps.get (authenticated for the fetch only)
+        id: deps
         env:
           HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
           HEX_FLEET_KEY: ${{ secrets.HEX_FLEET_KEY }}
         run: |
-          if [ -n "$HEX_ORG_KEY" ]; then
-            mix hex.organization auth cobenian --key "$HEX_ORG_KEY"
-          fi
+          # --- Hex organization access. IDENTICAL in the four steps that use it: change all four. ---
+          # hex_auth writes the keys into ~/.hex. hex_deauth removes every organization that was
+          # authenticated, then looks for either key anywhere under Hex's home and fails if one is
+          # still there. The EXIT trap runs it however the step ends, so a failed command never
+          # leaves a key behind. The keys leave the environment at once, so no other command this
+          # step runs (gitleaks, sobelow, the audits themselves) inherits them.
+          hex_org_key=${HEX_ORG_KEY:-}; hex_fleet_key=${HEX_FLEET_KEY:-}
+          unset HEX_ORG_KEY HEX_FLEET_KEY
+          authed=()
+          hex_auth() {
+            if [ -n "$hex_org_key" ]; then authed+=(cobenian); mix hex.organization auth cobenian --key "$hex_org_key"; fi
+            if [ -n "$hex_fleet_key" ]; then authed+=(fleet); mix hex.organization auth fleet --key "$hex_fleet_key"; fi
+          }
+          hex_deauth() {
+            local rc=0 org k
+            for org in ${authed[@]+"${authed[@]}"}; do
+              mix hex.organization deauth "$org" || { echo "::error::Could not deauthenticate Hex organization $org."; rc=1; }
+            done
+            authed=()
+            for k in "$hex_org_key" "$hex_fleet_key"; do
+              if [ -n "$k" ] && grep -rqsF -- "$k" "${HEX_HOME:-$HOME/.hex}"; then
+                echo "::error::A Hex organization key is still on disk after deauth."; rc=1
+              fi
+            done
+            return "$rc"
+          }
+          trap 'rc=$?; hex_deauth || rc=1; exit "$rc"' EXIT
+          # --- End of Hex organization access. ---
+          #
           # A SECOND ORGANISATION, WITH ITS OWN KEY. `fleet` holds libraries shared
           # across fleets that do not trust each other -- fleet_auth first. A Hex
           # organisation key grants read to EVERY package in its organisation and cannot
@@ -231,18 +287,8 @@ jobs:
           # an error naming a package rather than a credential. Left deliberately -- CI
           # goes red either way, so it is loud -- but it is a wrong-diagnosis-shaped error
           # and worth knowing before someone debugs the package.
-          if [ -n "$HEX_FLEET_KEY" ]; then
-            mix hex.organization auth fleet --key "$HEX_FLEET_KEY"
-          fi
-
-      # AN ID, SO THE POSTURE STEP CAN ASK. Every Mix-based scanner below needs the
-      # dependency tree; when this step fails they cannot answer, and several of them
-      # say so by exiting 0 with nothing to report -- which is indistinguishable from a
-      # clean result. `steps.deps.outcome` is the one honest signal that they could not
-      # have looked.
-      - name: deps.get
-        id: deps
-        run: mix deps.get
+          hex_auth
+          mix deps.get
 
       # --- blocking hygiene + correctness (check variants — never auto-fix) ---
       - name: deps.unlock --check-unused
@@ -298,7 +344,7 @@ jobs:
 
       # --- Dialyzer (report-only until dialyzer_blocking: true) ---
       - name: Cache Dialyzer PLTs
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: priv/plts
           key: ${{ runner.os }}-otp${{ inputs.otp-version }}-elixir${{ inputs.elixir-version }}-plt-v2-${{ hashFiles('**/mix.lock') }}
@@ -369,7 +415,7 @@ jobs:
       # is not the same as not blocking.
       - name: Cache gitleaks binary
         if: ${{ success() || failure() }}
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ./gitleaks
           key: gitleaks-${{ runner.os }}-${{ inputs.gitleaks_version }}
@@ -575,10 +621,43 @@ jobs:
           echo "ids=$joined" >> "$GITHUB_OUTPUT"
           echo "Acknowledged advisories: ${joined:-none}"
 
+      # hex.audit reads the private packages' registry entries, so it authenticates for
+      # itself and deauthenticates on the way out (see deps.get for why nothing else may).
       - name: hex.audit (retired packages + advisories)
         env:
           HEX_IGNORE_ADVISORIES: ${{ steps.audit_ignores.outputs.ids }}
+          HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
+          HEX_FLEET_KEY: ${{ secrets.HEX_FLEET_KEY }}
         run: |
+          # --- Hex organization access. IDENTICAL in the four steps that use it: change all four. ---
+          # hex_auth writes the keys into ~/.hex. hex_deauth removes every organization that was
+          # authenticated, then looks for either key anywhere under Hex's home and fails if one is
+          # still there. The EXIT trap runs it however the step ends, so a failed command never
+          # leaves a key behind. The keys leave the environment at once, so no other command this
+          # step runs (gitleaks, sobelow, the audits themselves) inherits them.
+          hex_org_key=${HEX_ORG_KEY:-}; hex_fleet_key=${HEX_FLEET_KEY:-}
+          unset HEX_ORG_KEY HEX_FLEET_KEY
+          authed=()
+          hex_auth() {
+            if [ -n "$hex_org_key" ]; then authed+=(cobenian); mix hex.organization auth cobenian --key "$hex_org_key"; fi
+            if [ -n "$hex_fleet_key" ]; then authed+=(fleet); mix hex.organization auth fleet --key "$hex_fleet_key"; fi
+          }
+          hex_deauth() {
+            local rc=0 org k
+            for org in ${authed[@]+"${authed[@]}"}; do
+              mix hex.organization deauth "$org" || { echo "::error::Could not deauthenticate Hex organization $org."; rc=1; }
+            done
+            authed=()
+            for k in "$hex_org_key" "$hex_fleet_key"; do
+              if [ -n "$k" ] && grep -rqsF -- "$k" "${HEX_HOME:-$HOME/.hex}"; then
+                echo "::error::A Hex organization key is still on disk after deauth."; rc=1
+              fi
+            done
+            return "$rc"
+          }
+          trap 'rc=$?; hex_deauth || rc=1; exit "$rc"' EXIT
+          # --- End of Hex organization access. ---
+          hex_auth
           unset HEX_IGNORE_RETIREMENTS
           mix hex.audit
         continue-on-error: ${{ contains(inputs.nonblocking, 'hex_audit') }}
@@ -604,11 +683,45 @@ jobs:
         continue-on-error: true
         env:
           IGNORE_IDS: ${{ steps.audit_ignores.outputs.ids }}
+          HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
+          HEX_FLEET_KEY: ${{ secrets.HEX_FLEET_KEY }}
         run: |
           set -uo pipefail
+          # --- Hex organization access. IDENTICAL in the four steps that use it: change all four. ---
+          # hex_auth writes the keys into ~/.hex. hex_deauth removes every organization that was
+          # authenticated, then looks for either key anywhere under Hex's home and fails if one is
+          # still there. The EXIT trap runs it however the step ends, so a failed command never
+          # leaves a key behind. The keys leave the environment at once, so no other command this
+          # step runs (gitleaks, sobelow, the audits themselves) inherits them.
+          hex_org_key=${HEX_ORG_KEY:-}; hex_fleet_key=${HEX_FLEET_KEY:-}
+          unset HEX_ORG_KEY HEX_FLEET_KEY
+          authed=()
+          hex_auth() {
+            if [ -n "$hex_org_key" ]; then authed+=(cobenian); mix hex.organization auth cobenian --key "$hex_org_key"; fi
+            if [ -n "$hex_fleet_key" ]; then authed+=(fleet); mix hex.organization auth fleet --key "$hex_fleet_key"; fi
+          }
+          hex_deauth() {
+            local rc=0 org k
+            for org in ${authed[@]+"${authed[@]}"}; do
+              mix hex.organization deauth "$org" || { echo "::error::Could not deauthenticate Hex organization $org."; rc=1; }
+            done
+            authed=()
+            for k in "$hex_org_key" "$hex_fleet_key"; do
+              if [ -n "$k" ] && grep -rqsF -- "$k" "${HEX_HOME:-$HOME/.hex}"; then
+                echo "::error::A Hex organization key is still on disk after deauth."; rc=1
+              fi
+            done
+            return "$rc"
+          }
+          trap 'rc=$?; hex_deauth || rc=1; exit "$rc"' EXIT
+          # --- End of Hex organization access. ---
           unset HEX_IGNORE_ADVISORIES HEX_IGNORE_RETIREMENTS
           d="${RUNNER_TEMP:-/tmp}/audit-stale"; mkdir -p "$d"
+          # Authenticated for hex.audit alone. A failed auth only means hex.audit cannot run,
+          # which the check below already reports as "could not tell".
+          hex_auth
           mix hex.audit > "$d/hex.txt" 2>&1; hex_rc=$?
+          hex_deauth
           mix deps.audit --format json > "$d/mixaudit.json" 2>/dev/null; mix_rc=$?
           # "Ran" means the tool produced its own verdict, not merely an exit code: both
           # can exit non-zero for a Mix error as well as for a finding.
@@ -668,9 +781,39 @@ jobs:
           GITLEAKS_VERSION: ${{ inputs.gitleaks_version }}
           # Whether the dependency tree exists at all. Every Mix-based scanner needs it.
           DEPS_OK: ${{ steps.deps.outcome == 'success' }}
+          HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
+          HEX_FLEET_KEY: ${{ secrets.HEX_FLEET_KEY }}
         run: |
           # NOTE: no `set -e` / no `set -x`. We must never fail the build.
           set -uo pipefail
+          # --- Hex organization access. IDENTICAL in the four steps that use it: change all four. ---
+          # hex_auth writes the keys into ~/.hex. hex_deauth removes every organization that was
+          # authenticated, then looks for either key anywhere under Hex's home and fails if one is
+          # still there. The EXIT trap runs it however the step ends, so a failed command never
+          # leaves a key behind. The keys leave the environment at once, so no other command this
+          # step runs (gitleaks, sobelow, the audits themselves) inherits them.
+          hex_org_key=${HEX_ORG_KEY:-}; hex_fleet_key=${HEX_FLEET_KEY:-}
+          unset HEX_ORG_KEY HEX_FLEET_KEY
+          authed=()
+          hex_auth() {
+            if [ -n "$hex_org_key" ]; then authed+=(cobenian); mix hex.organization auth cobenian --key "$hex_org_key"; fi
+            if [ -n "$hex_fleet_key" ]; then authed+=(fleet); mix hex.organization auth fleet --key "$hex_fleet_key"; fi
+          }
+          hex_deauth() {
+            local rc=0 org k
+            for org in ${authed[@]+"${authed[@]}"}; do
+              mix hex.organization deauth "$org" || { echo "::error::Could not deauthenticate Hex organization $org."; rc=1; }
+            done
+            authed=()
+            for k in "$hex_org_key" "$hex_fleet_key"; do
+              if [ -n "$k" ] && grep -rqsF -- "$k" "${HEX_HOME:-$HOME/.hex}"; then
+                echo "::error::A Hex organization key is still on disk after deauth."; rc=1
+              fi
+            done
+            return "$rc"
+          }
+          trap 'rc=$?; hex_deauth || rc=1; exit "$rc"' EXIT
+          # --- End of Hex organization access. ---
           mkdir -p .scan
 
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
@@ -750,6 +893,10 @@ jobs:
           # Text output only (no JSON format). exit 0 = none retired (honest []);
           # exit 1 = retired found → best-effort parse; anything else → null (omit).
           HEX_AUDIT='null'
+          # hex.audit and hex.outdated read the private packages' registry entries, so the
+          # organizations are authenticated around each of them and nothing else. A failed
+          # auth leaves the tool's output unparseable: null, never clean.
+          if [ "$DEPS_OK" = "true" ]; then hex_auth; fi
           if [ "$DEPS_OK" != "true" ]; then
             : # no dependency tree — this scanner cannot have looked. Stays null.
           elif mix hex.audit > .scan/hexaudit.txt 2>/dev/null; then
@@ -772,6 +919,7 @@ jobs:
               HEX_AUDIT='null'
             fi
           fi
+          hex_deauth
 
           # --- gitleaks (secret scan): COUNT ONLY — never value or location ---
           GITLEAKS='null'
@@ -820,7 +968,9 @@ jobs:
           # warnings to STDOUT -- so this text is rarely empty even with no table in it.
           HEX_OUTDATED='null'
           if [ "$DEPS_OK" = "true" ]; then
+            hex_auth
             mix hex.outdated > .scan/outdated.txt 2>/dev/null || true
+            hex_deauth
             HEX_OUTDATED="$(awk '
               # Locate the header and take each column'"'"'s START COLUMN from it. A column
               # added, removed or renamed then shifts an offset rather than silently
@@ -881,7 +1031,7 @@ jobs:
       - name: Upload scan posture artifact (issue #106 Option A)
         if: ${{ always() }}
         continue-on-error: true
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           # MUST equal the connector default GITHUB_SCAN_ARTIFACT_NAME — the Foundry
           # GitHub connector looks the artifact up by this exact name.
