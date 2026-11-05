@@ -1,0 +1,192 @@
+# The nightly check: runs every scan on an app whether or not its code changed, and sends one
+# report to the upkeep bucket. The watcher (Cobenian/upkeep) reads that report each morning.
+#
+# A scan that can't look is a failure, never a pass. Every check records "pass" only from a positive
+# result. If this job can't run or can't send, no report arrives, and the watcher goes red.
+#
+#   on:
+#     schedule: [{ cron: "7 6 * * *" }]
+#     workflow_dispatch:
+#   permissions: { contents: read, id-token: write, security-events: read }
+#   jobs:
+#     check:
+#       uses: Cobenian/.github/.github/workflows/nightly-check.yml@v2
+#       with: { app: time, report-role: arn:aws:iam::353254935868:role/cobenian-upkeep-report-time }
+#       secrets: inherit
+name: Nightly check (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: The app's slug in the upkeep manifest
+        type: string
+        required: true
+      report-role:
+        description: The AWS role that may write this app's report
+        type: string
+        required: true
+      bucket:
+        type: string
+        default: cobenian-upkeep-353254935868
+      sobelow-args:
+        type: string
+        default: --exit --skip --root .
+      mix-audit-version:
+        description: Used when the app doesn't list mix_audit itself
+        type: string
+        default: "2.1.5"
+      gitleaks-version:
+        type: string
+        default: "8.21.2"
+    secrets:
+      HEX_ORG_KEY:
+        required: false
+      HEX_FLEET_KEY:
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+  security-events: read
+
+jobs:
+  check:
+    name: Nightly check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Run every check
+        env:
+          HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
+          HEX_FLEET_KEY: ${{ secrets.HEX_FLEET_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          SOBELOW_ARGS: ${{ inputs.sobelow-args }}
+          MIX_AUDIT_VERSION: ${{ inputs.mix-audit-version }}
+          GITLEAKS_VERSION: ${{ inputs.gitleaks-version }}
+        run: |
+          set -uo pipefail
+          : > checks.jsonl
+          record() { # <name> <pass|fail> [detail]
+            jq -nc --arg n "$1" --arg s "$2" --arg d "${3:-}" \
+              '{name: $n, status: $s} + (if $d == "" then {} else {detail: $d} end)' >> checks.jsonl
+          }
+
+          # Keys live for the fetch and no longer.
+          [ -z "${HEX_ORG_KEY:-}" ] || mix hex.organization auth cobenian --key "$HEX_ORG_KEY"
+          [ -z "${HEX_FLEET_KEY:-}" ] || mix hex.organization auth fleet --key "$HEX_FLEET_KEY"
+          if mix deps.get > deps.log 2>&1; then deps=ok; else deps=failed; tail -20 deps.log; fi
+          [ -z "${HEX_ORG_KEY:-}" ] || mix hex.organization deauth cobenian
+          [ -z "${HEX_FLEET_KEY:-}" ] || mix hex.organization deauth fleet
+          unset HEX_ORG_KEY HEX_FLEET_KEY
+
+          if [ "$deps" = ok ]; then
+            record "deps.get" pass
+
+            # hex.audit can exit 0 without having looked, so it needs its positive sentence.
+            if out=$(mix hex.audit 2>&1) && grep -Eq "No retired .*packages found" <<< "$out"; then
+              record "hex.audit" pass
+            else
+              echo "$out" | tail -20
+              record "hex.audit" fail "retired packages, or it could not check"
+            fi
+
+            if mix help deps.audit > /dev/null 2>&1; then
+              audit=(mix deps.audit)
+            else
+              mix escript.install hex mix_audit "$MIX_AUDIT_VERSION" --force > /dev/null 2>&1
+              audit=("$HOME/.mix/escripts/mix_audit")
+            fi
+            ids=$(grep -oE '(GHSA|CVE)-[A-Za-z0-9-]+' .audit-ignore.yml 2>/dev/null | sort -u | paste -sd, - || true)
+            "${audit[@]}" --format json ${ids:+--ignore-advisory-ids "$ids"} > audit.json 2> audit.err
+            if jq -e '.pass == true' audit.json > /dev/null 2>&1; then
+              record "deps.audit" pass
+            else
+              n=$(jq -r '.vulnerabilities | length' audit.json 2>/dev/null || echo "")
+              record "deps.audit" fail "${n:-unknown} vulnerable libraries, or it could not check"
+            fi
+
+            # shellcheck disable=SC2086
+            if mix sobelow $SOBELOW_ARGS > sobelow.log 2>&1; then
+              record "sobelow" pass
+            else
+              tail -30 sobelow.log
+              record "sobelow" fail "findings, or it could not check"
+            fi
+          else
+            record "deps.get" fail "libraries could not be fetched, so nothing that needs them ran"
+          fi
+
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          if curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o gitleaks.tar.gz "$url" \
+             && tar -xzf gitleaks.tar.gz gitleaks; then
+            if ./gitleaks detect --source . --redact --no-banner --exit-code 1; then
+              record "gitleaks" pass
+            else
+              record "gitleaks" fail "possible secrets in the repository"
+            fi
+          else
+            record "gitleaks" fail "could not be fetched"
+          fi
+          rm -f gitleaks.tar.gz
+
+          if gh api --paginate "repos/$GITHUB_REPOSITORY/dependabot/alerts?state=open&per_page=100" > alerts.json 2> alerts.err; then
+            record "dependabot alerts" pass
+          else
+            cat alerts.err
+            echo '[]' > alerts.json
+            record "dependabot alerts" fail "could not be read"
+          fi
+
+      - name: Write the report
+        if: always()
+        env:
+          APP: ${{ inputs.app }}
+        run: |
+          [ -s checks.jsonl ] || { echo "::error::No checks ran."; exit 1; }
+          jq -s -c '[.[][] | {
+            id: (.security_advisory.cve_id // .security_advisory.ghsa_id),
+            severity: .security_vulnerability.severity,
+            package: .dependency.package.name,
+            opened_at: .created_at
+          }]' alerts.json > advisories.json || echo '[]' > advisories.json
+          jq -n \
+            --arg app "$APP" \
+            --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg commit "$GITHUB_SHA" \
+            --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --slurpfile checks <(jq -s . checks.jsonl) \
+            --slurpfile advisories advisories.json \
+            '{app: $app, generated_at: $at, commit: $commit, run: $run,
+              checks: $checks[0], advisories: $advisories[0], held: [], shipped: []}' > report.json
+          jq . report.json
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        if: always()
+        with:
+          role-to-assume: ${{ inputs.report-role }}
+          aws-region: us-east-1
+
+      - name: Send the report
+        if: always()
+        env:
+          APP: ${{ inputs.app }}
+          BUCKET: ${{ inputs.bucket }}
+        run: aws s3 cp report.json "s3://$BUCKET/reports/$APP/latest.json" --content-type application/json --no-progress
+
+      - name: Fail this run if any check failed
+        if: always()
+        run: |
+          failed=$(jq -r 'select(.status != "pass") | .name' checks.jsonl | paste -sd, -)
+          [ -z "$failed" ] || { echo "::error::Failed: $failed"; exit 1; }
