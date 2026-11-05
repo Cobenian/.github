@@ -7,7 +7,7 @@
 #   on:
 #     schedule: [{ cron: "7 6 * * *" }]
 #     workflow_dispatch:
-#   permissions: { contents: read, id-token: write, security-events: read }
+#   permissions: { contents: read, id-token: write }
 #   jobs:
 #     check:
 #       uses: Cobenian/.github/.github/workflows/nightly-check.yml@v2
@@ -48,7 +48,6 @@ on:
 permissions:
   contents: read
   id-token: write
-  security-events: read
 
 jobs:
   check:
@@ -71,7 +70,6 @@ jobs:
         env:
           HEX_ORG_KEY: ${{ secrets.HEX_ORG_KEY }}
           HEX_FLEET_KEY: ${{ secrets.HEX_FLEET_KEY }}
-          GH_TOKEN: ${{ github.token }}
           SOBELOW_ARGS: ${{ inputs.sobelow-args }}
           MIX_AUDIT_VERSION: ${{ inputs.mix-audit-version }}
           GITLEAKS_VERSION: ${{ inputs.gitleaks-version }}
@@ -141,12 +139,52 @@ jobs:
           fi
           rm -f gitleaks.tar.gz
 
-          if gh api --paginate "repos/$GITHUB_REPOSITORY/dependabot/alerts?state=open&per_page=100" > alerts.json 2> alerts.err; then
-            record "dependabot alerts" pass
+          # OSV carries the same advisories as GitHub. Actions' own token can't read Dependabot
+          # alerts, and a stored token would be one more thing that can quietly stop working.
+          if python3 - <<'PY'
+          import json, re, sys, urllib.request
+
+          def call(url, body=None):
+              data = json.dumps(body).encode() if body else None
+              req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.load(r)
+
+          lock = open("mix.lock", encoding="utf-8").read()
+          packages = sorted(set(re.findall(r'\{:hex, :([a-z0-9_]+), "([^"]+)"', lock)))
+          if not packages:
+              sys.exit("no packages found in mix.lock")
+
+          queries = [{"package": {"ecosystem": "Hex", "name": n}, "version": v} for n, v in packages]
+          results = call("https://api.osv.dev/v1/querybatch", {"queries": queries})["results"]
+          if len(results) != len(queries):
+              sys.exit("OSV answered for the wrong number of packages")
+
+          try:
+              ignored = set(re.findall(r"(?:GHSA|CVE)-[A-Za-z0-9-]+", open(".audit-ignore.yml").read()))
+          except FileNotFoundError:
+              ignored = set()
+
+          advisories = []
+          for (name, version), result in zip(packages, results):
+              for vuln in result.get("vulns") or []:
+                  full = call(f"https://api.osv.dev/v1/vulns/{vuln['id']}")
+                  if ignored & {full["id"], *full.get("aliases", [])}:
+                      continue
+                  advisories.append({
+                      "id": full["id"],
+                      "package": f"{name} {version}",
+                      "severity": full.get("database_specific", {}).get("severity", "unknown"),
+                      "opened_at": full.get("published"),
+                  })
+          json.dump(advisories, open("advisories.json", "w"))
+          print(f"{len(packages)} packages checked, {len(advisories)} advisories")
+          PY
+          then
+            record "advisories" pass
           else
-            cat alerts.err
-            echo '[]' > alerts.json
-            record "dependabot alerts" fail "could not be read"
+            echo '[]' > advisories.json
+            record "advisories" fail "could not be checked"
           fi
 
       - name: Write the report
@@ -155,12 +193,6 @@ jobs:
           APP: ${{ inputs.app }}
         run: |
           [ -s checks.jsonl ] || { echo "::error::No checks ran."; exit 1; }
-          jq -s -c '[.[][] | {
-            id: (.security_advisory.cve_id // .security_advisory.ghsa_id),
-            severity: .security_vulnerability.severity,
-            package: .dependency.package.name,
-            opened_at: .created_at
-          }]' alerts.json > advisories.json || echo '[]' > advisories.json
           jq -n \
             --arg app "$APP" \
             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
