@@ -95,7 +95,7 @@ jobs:
             record "deps.get" pass
 
             # hex.audit can exit 0 without having looked, so it needs its positive sentence.
-            if out=$(mix hex.audit 2>&1) && grep -q "No retired packages found" <<< "$out"; then
+            if out=$(mix hex.audit 2>&1) && grep -Eq "No retired .*packages found" <<< "$out"; then
               record "hex.audit" pass
             else
               echo "$out" | tail -20
