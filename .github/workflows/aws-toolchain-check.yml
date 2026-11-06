@@ -1,4 +1,4 @@
-# Weekly: is a newer Elixir, OTP or Debian base image published than the one the Dockerfile
+# Nightly: is a newer Elixir, OTP or Debian base image published than the one the Dockerfile
 # builds on? If so, open one issue (labelled for whoever fixes these) asking for the bump, so
 # security patches in the toolchain are not missed. The Dockerfile must carry
 # `ARG ELIXIR_VERSION=`, `ARG OTP_VERSION=` and `ARG DEBIAN_VERSION=` lines.
@@ -44,12 +44,28 @@ jobs:
           [ -n "$elixir" ] && [ -n "$otp" ] && [ -n "$debian" ] ||
             { echo "::error::$DOCKERFILE must have ARG ELIXIR_VERSION, OTP_VERSION and DEBIAN_VERSION lines."; exit 1; }
           minor=${elixir%.*}
-          latest=$(curl -fsS "https://hub.docker.com/v2/repositories/hexpm/elixir/tags?page_size=100&name=$minor." \
-            | jq -r '.results[].name' | grep -E "^[0-9.]+-erlang-[0-9.]+-debian-trixie-[0-9]+-slim$" | sort -V | tail -1)
-          [ -n "$latest" ] || { echo "Couldn't read Docker Hub; trying again next week."; exit 0; }
+          # Docker Hub holds tens of thousands of tags for this image and returns the newest
+          # first, so one page can hide the highest OTP. Read several pages, and treat a short
+          # read as unknown: a list we didn't finish must never produce a target.
+          url="https://hub.docker.com/v2/repositories/hexpm/elixir/tags?page_size=100&name=$minor."
+          tags=""
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            page=$(curl -fsS "$url") || { echo "Couldn't read Docker Hub; trying again tonight."; exit 0; }
+            tags="$tags$(jq -r '.results[].name' <<<"$page")"$'\n'
+            url=$(jq -r '.next // empty' <<<"$page")
+            [ -n "$url" ] || break
+          done
+          candidates=$(grep -E "^[0-9.]+-erlang-[0-9.]+-debian-trixie-[0-9]+-slim$" <<<"$tags" || true)
+          latest=$(sort -V <<<"$candidates" | tail -1)
+          [ -n "$latest" ] || { echo "Couldn't read Docker Hub; trying again tonight."; exit 0; }
           want="$elixir-erlang-$otp-debian-$debian"
           echo "Dockerfile: $want"; echo "Published:  $latest"
           [ "$latest" = "$want" ] && { echo "Up to date."; exit 0; }
+          otp_latest=${latest#*-erlang-}; otp_latest=${otp_latest%%-debian-*}
+          if [ "$(printf '%s\n' "$otp" "$otp_latest" | sort -V | tail -1)" != "$otp_latest" ]; then
+            echo "::warning::Newest tag read has OTP $otp_latest, below the Dockerfile's $otp. Not asking for a downgrade."
+            exit 0
+          fi
           title="Update the toolchain image to $latest"
           if gh issue list --state open --search "$title in:title" --json number --jq 'length' | grep -qx 0; then
             gh label create "$LABEL" --color 1D76DB --force >/dev/null
