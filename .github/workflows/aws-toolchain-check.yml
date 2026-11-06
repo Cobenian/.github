@@ -71,5 +71,5 @@ jobs:
             gh label create "$LABEL" --color 1D76DB --force >/dev/null
             gh issue create --label "$LABEL" --title "$title" --body "The Dockerfile builds on \`$want\`; \`$latest\` is published.
 
-          Change the Dockerfile's ARG lines (ELIXIR_VERSION, OTP_VERSION, DEBIAN_VERSION) and .tool-versions to match, so local, CI and production use the same toolchain. Security patches in Elixir, OTP and Debian are the reason this exists."
+          Change the Dockerfile's ARG lines (ELIXIR_VERSION, OTP_VERSION, DEBIAN_VERSION, and BUILDER_DIGEST and RUNNER_DIGEST if it pins digests, or nothing moves) and .tool-versions to match, so local, CI and production use the same toolchain. Security patches in Elixir, OTP and Debian are the reason this exists."
           fi
