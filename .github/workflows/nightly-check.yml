@@ -224,6 +224,10 @@ jobs:
         timeout-minutes: 15
         env:
           SIGNED_IN: ${{ steps.aws-scan.outcome }}
+          # A drill: with the caller repository's NIGHTLY_DRILL variable set to 1, a run started by
+          # hand adds one made-up finding, so the rebuild, the wait and the rescan run for real.
+          # Scheduled runs ignore it, so a variable left set can't fake a finding at night.
+          DRILL: ${{ vars.NIGHTLY_DRILL == '1' && github.event_name == 'workflow_dispatch' }}
         run: |
           set -uo pipefail
           # Trivy is downloaded, never installed from a third-party action: this version, checked
@@ -286,6 +290,13 @@ jobs:
           rm -f trivy.tar.gz
 
           scan_running before.json || { record fail "the running image could not be scanned"; exit 0; }
+          if [ "$DRILL" = true ]; then
+            echo "::notice::Drill: adding a made-up Debian finding (drill-test) so the rebuild runs."
+            jq '. + [{id: "DRILL-0000", severity: "HIGH", package: "drill-test", installed: "1.0",
+                      fixed: "1.0+drill", kind: "debian", image: "drill"}]' before.json > drill.json
+            mv drill.json before.json
+            touch "$RUNNER_TEMP/drill"
+          fi
           cp before.json image-fixes.json
           debian=$(jq '[.[] | select(.kind == "debian")] | length' before.json)
           library=$(jq '[.[] | select(.kind == "library")] | length' before.json)
@@ -356,7 +367,9 @@ jobs:
           jq --slurpfile after after.json '[.[] | select(. as $b | $after[0] | map(select(.package == $b.package and .id == $b.id)) | length == 0)]' \
             before.json > installed.json
           if [ "$(jq length installed.json)" != 0 ]; then
-            jq -n --arg s "Rebuilt to install Debian fixes: $(summary installed.json)" '[$s]' > shipped.json
+            note="Rebuilt to install Debian fixes: $(summary installed.json)"
+            [ ! -e "$RUNNER_TEMP/drill" ] || note="Drill, started by hand. $note"
+            jq -n --arg s "$note" '[$s]' > shipped.json
           fi
           if [ "$(jq length after.json)" = 0 ]; then
             record pass
