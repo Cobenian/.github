@@ -4,10 +4,16 @@
 # A scan that can't look is a failure, never a pass. Every check records "pass" only from a positive
 # result. If this job can't run or can't send, no report arrives, and the watcher goes red.
 #
+# It also scans the image the app is actually running (Trivy) for high and critical problems in
+# Debian packages that Debian has already fixed. When there are any, it starts the app's Refresh
+# (the rebuild that installs every available fix), waits for it, and scans again. The check
+# passes only if the image running afterwards has none. Problems nobody has fixed yet don't fail
+# it: the morning watcher already counts those from AWS's own scan.
+#
 #   on:
 #     schedule: [{ cron: "7 6 * * *" }]
 #     workflow_dispatch:
-#   permissions: { contents: read, id-token: write }
+#   permissions: { contents: read, id-token: write, actions: write }
 #   jobs:
 #     check:
 #       uses: Cobenian/.github/.github/workflows/nightly-check.yml@v2
@@ -39,6 +45,18 @@ on:
       gitleaks-version:
         type: string
         default: "8.21.2"
+      ecs-cluster:
+        description: The app's ECS cluster; empty means cobenian-<app>
+        type: string
+        default: ""
+      ecs-service:
+        description: The app's ECS service; empty means cobenian-<app>
+        type: string
+        default: ""
+      refresh-workflow:
+        description: The app's rebuild workflow, started when a fix is waiting
+        type: string
+        default: refresh.yml
     secrets:
       HEX_ORG_KEY:
         required: false
@@ -48,14 +66,18 @@ on:
 permissions:
   contents: read
   id-token: write
+  actions: write
 
 jobs:
   check:
     name: Nightly check
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Room for a rebuild when the running image needs one.
+    timeout-minutes: 100
     env:
       MIX_ENV: test
+      CLUSTER: ${{ inputs.ecs-cluster || format('cobenian-{0}', inputs.app) }}
+      SERVICE: ${{ inputs.ecs-service || format('cobenian-{0}', inputs.app) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -187,12 +209,172 @@ jobs:
             record "advisories" fail "could not be checked"
           fi
 
+      # --- The running image -------------------------------------------------------------------
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        id: aws-scan
+        if: always()
+        continue-on-error: true
+        with:
+          role-to-assume: ${{ inputs.report-role }}
+          aws-region: us-east-1
+
+      - name: Scan the running image for problems that have a fix
+        id: scan
+        if: always()
+        timeout-minutes: 15
+        env:
+          SIGNED_IN: ${{ steps.aws-scan.outcome }}
+        run: |
+          set -uo pipefail
+          # Trivy is downloaded, never installed from a third-party action: this version, checked
+          # against this hash (the release's checksums file, whose Sigstore signature from Trivy's
+          # own release workflow was verified when it was pinned). Change both together.
+          cat > "$RUNNER_TEMP/image-scan.sh" <<'SH'
+          TRIVY_VERSION=0.76.2
+          TRIVY_SHA256=bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+          record() { # <pass|fail> [detail]
+            jq -nc --arg s "$1" --arg d "${2:-}" \
+              '{name: "image-fixes", status: $s} + (if $d == "" then {} else {detail: $d} end)' >> checks.jsonl
+          }
+          # The image the service runs now, from its task definition (never "latest").
+          running_image() {
+            local td
+            td=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+              --query 'services[0].taskDefinition' --output text) || return 1
+            [ -n "$td" ] && [ "$td" != None ] || return 1
+            aws ecs describe-task-definition --task-definition "$td" --output json \
+              --query 'taskDefinition.{image: containerDefinitions[0].image, arch: runtimePlatform.cpuArchitecture}' > running.json || return 1
+            jq -e '.image | strings' running.json > /dev/null
+          }
+          # <out.json>: every high or critical problem with a fix, in the running image.
+          scan_running() {
+            running_image || { echo "::warning::Couldn't read the running image."; return 1; }
+            local image arch registry
+            image=$(jq -r .image running.json)
+            arch=$(jq -r 'if .arch == "X86_64" then "amd64" else "arm64" end' running.json)
+            registry=${image%%/*}
+            aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" > /dev/null || return 1
+            ./trivy image --quiet --no-progress --skip-version-check --timeout 10m --cache-dir .trivy \
+              --image-src remote --platform "linux/$arch" --scanners vuln --pkg-types os,library \
+              --severity HIGH,CRITICAL --ignore-unfixed --format json --output trivy.json "$image" || return 1
+            # The scan must have read the image's operating system, or "nothing found" means nothing.
+            jq -e '.Metadata.OS.Family | strings' trivy.json > /dev/null || return 1
+            jq --arg image "$image" '[.Results[]? | .Class as $class | .Vulnerabilities[]?
+                | select((.FixedVersion // "") != "")
+                | {id: .VulnerabilityID, severity: .Severity, package: .PkgName,
+                   installed: .InstalledVersion, fixed: .FixedVersion,
+                   kind: (if $class == "os-pkgs" then "debian" else "library" end), image: $image}]
+              | unique_by([.package, .installed, .fixed, .id])' trivy.json > "$1"
+          }
+          # "gzip 1.13-1 → 1.13-1+deb13u1, …" for a report line, at most eight.
+          summary() {
+            jq -r '[unique_by([.package, .installed, .fixed])[] | "\(.package) \(.installed) → \(.fixed)"]
+              | (.[:8] | join(", ")) + (if length > 8 then ", and \(length - 8) more" else "" end)' "$1"
+          }
+          SH
+          # shellcheck disable=SC1091
+          . "$RUNNER_TEMP/image-scan.sh"
+          echo '[]' > image-fixes.json
+
+          [ "$SIGNED_IN" = success ] || { record fail "could not sign in to AWS to read the running image"; exit 0; }
+          url="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          if ! { curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o trivy.tar.gz "$url" \
+                 && echo "$TRIVY_SHA256  trivy.tar.gz" | sha256sum -c --quiet \
+                 && tar -xzf trivy.tar.gz trivy; }; then
+            record fail "Trivy could not be fetched, or its checksum didn't match"; exit 0
+          fi
+          rm -f trivy.tar.gz
+
+          scan_running before.json || { record fail "the running image could not be scanned"; exit 0; }
+          cp before.json image-fixes.json
+          debian=$(jq '[.[] | select(.kind == "debian")] | length' before.json)
+          library=$(jq '[.[] | select(.kind == "library")] | length' before.json)
+          echo "Problems with a fix in the running image: $debian in Debian packages, $library in libraries."
+          if [ "$debian" = 0 ] && [ "$library" = 0 ]; then record pass; exit 0; fi
+          if [ "$debian" = 0 ]; then
+            # A rebuild only installs Debian's fixes; a library needs its version changed.
+            record fail "$library problems with a fix need a library version change: $(summary before.json)"; exit 0
+          fi
+          # Debian has fixes the running image doesn't: the rebuild below installs them.
+          echo "rebuild=true" >> "$GITHUB_OUTPUT"
+
+      - name: Rebuild to install the fixes
+        id: rebuild
+        if: always() && steps.scan.outputs.rebuild == 'true'
+        timeout-minutes: 60
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REFRESH: ${{ inputs.refresh-workflow }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -uo pipefail
+          # If a rebuild is already going (tonight's, running late), wait for that one instead.
+          id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$REFRESH" --limit 20 --json databaseId,status \
+            --jq '[.[] | select(.status != "completed")][0].databaseId // empty')
+          if [ -z "$id" ]; then
+            since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            gh workflow run "$REFRESH" -R "$GITHUB_REPOSITORY" --ref "$BRANCH"
+            for _ in $(seq 1 36); do
+              sleep 5
+              id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$REFRESH" --event workflow_dispatch \
+                --created ">=$since" --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+              [ -n "$id" ] && break
+            done
+          fi
+          [ -n "$id" ] || { echo "result=did not start" >> "$GITHUB_OUTPUT"; exit 0; }
+          echo "url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$id" >> "$GITHUB_OUTPUT"
+          gh run watch "$id" -R "$GITHUB_REPOSITORY" --interval 30 > /dev/null 2>&1 || true
+          echo "result=$(gh run view "$id" -R "$GITHUB_REPOSITORY" --json conclusion --jq '.conclusion // "unknown"')" >> "$GITHUB_OUTPUT"
+
+      # Fresh credentials: the first ones may have expired while the rebuild ran.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        id: aws-rescan
+        if: always() && steps.scan.outputs.rebuild == 'true'
+        continue-on-error: true
+        with:
+          role-to-assume: ${{ inputs.report-role }}
+          aws-region: us-east-1
+
+      - name: Scan again after the rebuild
+        if: always() && steps.scan.outputs.rebuild == 'true'
+        timeout-minutes: 15
+        env:
+          SIGNED_IN: ${{ steps.aws-rescan.outcome }}
+          RESULT: ${{ steps.rebuild.outputs.result || 'did not finish' }}
+          RUN_URL: ${{ steps.rebuild.outputs.url }}
+        run: |
+          set -uo pipefail
+          # shellcheck disable=SC1091
+          . "$RUNNER_TEMP/image-scan.sh"
+          rebuild="The rebuild ${RUN_URL:+($RUN_URL) }ended: $RESULT."
+          if [ "$SIGNED_IN" != success ] || ! scan_running after.json; then
+            record fail "$(jq length before.json) problems with a fix were in the running image ($(summary before.json)), and it could not be scanned again. $rebuild"
+            exit 0
+          fi
+          cp after.json image-fixes.json
+          # Installed by the rebuild: in the first scan, gone from the second.
+          jq --slurpfile after after.json '[.[] | select(. as $b | $after[0] | map(select(.package == $b.package and .id == $b.id)) | length == 0)]' \
+            before.json > installed.json
+          if [ "$(jq length installed.json)" != 0 ]; then
+            jq -n --arg s "Rebuilt to install Debian fixes: $(summary installed.json)" '[$s]' > shipped.json
+          fi
+          if [ "$(jq length after.json)" = 0 ]; then
+            record pass
+          else
+            record fail "$(jq length after.json) problems with a fix are still in the running image after a rebuild: $(summary after.json). $rebuild"
+          fi
+
       - name: Write the report
         if: always()
         env:
           APP: ${{ inputs.app }}
         run: |
           [ -s checks.jsonl ] || { echo "::error::No checks ran."; exit 1; }
+          [ -s image-fixes.json ] || echo '[]' > image-fixes.json
+          [ -s shipped.json ] || echo '[]' > shipped.json
+          # A scan that started but never recorded (cancelled, timed out) is a failure.
+          grep -q '"name":"image-fixes"' checks.jsonl ||
+            jq -nc '{name: "image-fixes", status: "fail", detail: "the running image scan did not finish"}' >> checks.jsonl
           jq -n \
             --arg app "$APP" \
             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -200,8 +382,11 @@ jobs:
             --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             --slurpfile checks <(jq -s . checks.jsonl) \
             --slurpfile advisories advisories.json \
+            --slurpfile fixes image-fixes.json \
+            --slurpfile shipped shipped.json \
             '{app: $app, generated_at: $at, commit: $commit, run: $run,
-              checks: $checks[0], advisories: $advisories[0], held: [], shipped: []}' > report.json
+              checks: $checks[0], advisories: $advisories[0], held: [], shipped: $shipped[0],
+              image_fixes: $fixes[0]}' > report.json
           jq . report.json
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
