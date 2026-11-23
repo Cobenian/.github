@@ -179,17 +179,19 @@ jobs:
             *) echo "::error::max-severity must be CRITICAL, HIGH or MEDIUM (got '$MAX_SEVERITY')."; exit 1 ;;
           esac
           # The scan starts a moment after the push, so "no scan yet" just means wait.
+          # --no-paginate: past 100 findings the CLI pages the answer, and text output then
+          # prints COMPLETE followed by "None" per extra page, which never equals COMPLETE.
           status=PENDING
           for _ in $(seq 1 60); do
             status=$(aws ecr describe-image-scan-findings --repository-name "$APP" --image-id imageTag="$TAG" \
-              --query 'imageScanStatus.status' --output text 2>/dev/null || echo PENDING)
+              --no-paginate --query 'imageScanStatus.status' --output text 2>/dev/null || echo PENDING)
             [ "$status" = COMPLETE ] && break
             [ "$status" = FAILED ] && { echo "::error::The image scan failed."; exit 1; }
             sleep 10
           done
           [ "$status" = COMPLETE ] || { echo "::error::The image scan didn't finish in 10 minutes."; exit 1; }
           aws ecr describe-image-scan-findings --repository-name "$APP" --image-id imageTag="$TAG" \
-            --query 'imageScanFindings.findingSeverityCounts' --output json | tee counts.json
+            --no-paginate --query 'imageScanFindings.findingSeverityCounts' --output json | tee counts.json
           # `null` (no findings at all) counts as zero.
           found=$(jq --argjson b "$blocking" '[(. // {}) | to_entries[] | select(.key as $k | $b | index($k)) | .value] | add // 0' counts.json)
           [ "$found" = 0 ] || { echo "::error::The image has $found vulnerabilities at $MAX_SEVERITY or above."; exit 1; }
