@@ -147,7 +147,7 @@ jobs:
         if: steps.what.outputs.skip != 'true'
         with: { role-to-assume: "${{ inputs.deploy-role }}", aws-region: "${{ inputs.aws-region }}" }
 
-      - uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+      - uses: aws-actions/amazon-ecr-login@7290e214a610b32bc0eef81748948b6d466a8783 # v2
         if: steps.what.outputs.skip != 'true'
         id: ecr
 
